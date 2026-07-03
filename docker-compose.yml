@@ -1,0 +1,48 @@
+services:
+  patrimoine:
+    build: .
+    container_name: patrimoine
+
+    # ====================================================================
+    #  CONFIG PAR DÉFAUT — Ollama publie son port 11434 sur le Pi.
+    #  Vérifier avec :  docker port <conteneur-ollama>
+    #  Si tu vois "11434/tcp -> 0.0.0.0:11434", cette config marche telle quelle :
+    #  le conteneur partage le réseau du Pi et joint Ollama sur localhost.
+    # ====================================================================
+    network_mode: host
+    environment:
+      - OLLAMA_HOST=http://localhost:11434
+      - OLLAMA_MODEL=qwen2.5:3b          # remplace par un modèle de `ollama list`
+      - DB_PATH=/data/patrimoine.db
+      # Clés Binance en LECTURE SEULE (permission "Read Info" uniquement).
+      # OPTIONNEL : tu peux aussi les saisir directement dans l'onglet Patrimoine.
+      - BINANCE_API_KEY=
+      - BINANCE_API_SECRET=
+    volumes:
+      - ./data:/data                   # la base SQLite survit aux redémarrages
+    restart: unless-stopped
+
+    # ====================================================================
+    #  VARIANTE — Ollama N'est PAS publié sur le Pi (dialogue conteneur-à-conteneur).
+    #  1) COMMENTE les 3 lignes "network_mode / OLLAMA_HOST(localhost)" ci-dessus.
+    #  2) DÉCOMMENTE le bloc ci-dessous ET le bloc "networks:" en bas.
+    #  3) Mets le NOM EXACT du conteneur Ollama dans OLLAMA_HOST (docker ps)
+    #     et le NOM de son réseau dans networks.name
+    #     (docker inspect <ollama> -f '{{range $$k,$$v := .NetworkSettings.Networks}}{{$$k}} {{end}}')
+    # --------------------------------------------------------------------
+    # ports:
+    #   - "8000:8000"
+    # environment:
+    #   - OLLAMA_HOST=http://ollama:11434   # 'ollama' = nom du conteneur Ollama
+    #   - OLLAMA_MODEL=llama3.2
+    #   - DB_PATH=/data/patrimoine.db
+    # volumes:
+    #   - ./data:/data
+    # networks:
+    #   - reseau_ollama
+    # restart: unless-stopped
+
+# networks:
+#   reseau_ollama:
+#     external: true
+#     name: NOM_DU_RESEAU_OLLAMA

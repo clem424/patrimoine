@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Données locales (la base ne doit JAMAIS être versionnée)
+data/
+*.db
+*.db.*
+
+# Secrets / config locale
+.env
+.env.*
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Divers
+.DS_Store
+*.log

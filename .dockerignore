@@ -1,0 +1,10 @@
+**/node_modules
+**/__pycache__
+**/dist
+**/*.pyc
+data
+*.db
+.git
+.gitignore
+README.md
+start.sh

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  CartesianGrid, Cell, FunnelChart, Funnel, LabelList,
+  CartesianGrid, Cell, FunnelChart, Funnel, LabelList, ReferenceLine,
 } from 'recharts'
 import { api, eur, eur0, mois, classColor, isHidden, cssVar } from '../lib/api.js'
 import { Eye, EyeOff } from './icons.jsx'
@@ -40,6 +40,16 @@ export default function Dashboard({ goImport }) {
   const [periode, setPeriode] = useState('mois')
   const [decalage, setDecalage] = useState(0)
   const [dep, setDep] = useState(null)
+  // drill-down : catégorie cliquée -> dépenses par marchand sur la même fenêtre
+  const [selCat, setSelCat] = useState(null)
+  const [marchands, setMarchands] = useState(null)
+  // patrimoine projeté (+ scénario « si j'investissais X €/mois de plus »).
+  // Comptes courants exclus par défaut : solde fluctuant à 0 % qui dilue
+  // le taux moyen sans rien projeter.
+  const [horizon, setHorizon] = useState(10)
+  const [extra, setExtra] = useState(0)
+  const [ccInclus, setCcInclus] = useState(false)
+  const [proj, setProj] = useState(null)
   // masquage individuel (persistant) : total et classes d'actifs
   const [maskTotal, setMaskTotal] = useState(localStorage.getItem('mask_total') === '1')
   const [maskCls, setMaskCls] = useState(
@@ -64,6 +74,13 @@ export default function Dashboard({ goImport }) {
   useEffect(() => {
     api.depenses(periode, decalage).then(setDep).catch(() => {})
   }, [periode, decalage])
+  useEffect(() => {
+    if (!selCat) { setMarchands(null); return }
+    api.depensesMarchands(selCat, periode, decalage).then(setMarchands).catch(() => {})
+  }, [selCat, periode, decalage])
+  useEffect(() => {
+    api.projection(horizon, extra, ccInclus).then(setProj).catch(() => {})
+  }, [horizon, extra, ccInclus])
 
   if (err) return <Banner err={err} />
   if (!d) return <Loading />
@@ -210,6 +227,97 @@ export default function Dashboard({ goImport }) {
         </div>
       )}
 
+      {/* Patrimoine projeté : croissance visée des actifs + épargne mensuelle */}
+      {proj?.serie?.length > 1 && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="row between" style={{ flexWrap: 'wrap', gap: 10 }}>
+            <h3 style={{ marginBottom: 0 }}>Patrimoine projeté</h3>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <div className="seg" title="Et si j'investissais X €/mois de plus ?">
+                {[0, 50, 100, 250, 500].map((n) => (
+                  <button key={n} className={extra === n ? 'on' : ''}
+                    onClick={() => setExtra(n)}>{n === 0 ? '+0 €' : `+${n} €/m`}</button>
+                ))}
+              </div>
+              <div className="seg">
+                {[1, 5, 10, 20].map((n) => (
+                  <button key={n} className={horizon === n ? 'on' : ''}
+                    onClick={() => setHorizon(n)}>{n} an{n > 1 ? 's' : ''}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <p className="muted" style={{ fontSize: 12.5, margin: '10px 0 4px' }}>
+            Croissance visée moyenne : <b>{proj.taux_moyen}%/an</b>
+            {' '}· épargne comptée : <b>{eur0(proj.epargne_mensuelle)}/mois</b>
+            {' '}· dans {horizon} an{horizon > 1 ? 's' : ''} :{' '}
+            <b>{eur0(proj.serie[proj.serie.length - 1].programme)}</b>
+            {extra > 0 && proj.serie[proj.serie.length - 1].programme_plus != null && (
+              <> · en investissant <b>+{extra} €/mois</b> :{' '}
+                <b className="pos">{eur0(proj.serie[proj.serie.length - 1].programme_plus)}</b>
+                {' '}(soit +{eur0(proj.serie[proj.serie.length - 1].programme_plus
+                  - proj.serie[proj.serie.length - 1].programme)} de mieux)</>
+            )}
+            {' '}· <label style={{ cursor: 'pointer', whiteSpace: 'nowrap' }}
+              title="Le solde des comptes courants fluctue et ne « croît » pas : il est exclu par défaut pour ne pas diluer le taux moyen">
+              <input type="checkbox" checked={ccInclus}
+                onChange={(e) => setCcInclus(e.target.checked)}
+                style={{ verticalAlign: '-2px', marginRight: 4 }} />
+              inclure les comptes courants</label>
+          </p>
+          <ResponsiveContainer width="100%" height={240}>
+            <AreaChart data={proj.serie} margin={{ left: -8, right: 8, top: 4 }}>
+              <defs>
+                <linearGradient id="gp" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={C.indigo} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={C.indigo} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke={C.grid} vertical={false} />
+              <XAxis dataKey="mois" tick={{ fontSize: 11, fill: C.muted }}
+                tickFormatter={(s) => mois(s)} minTickGap={40} />
+              <YAxis tick={{ fontSize: 11, fill: C.muted }} domain={['auto', 'auto']}
+                tickFormatter={(v) => eur0(v)} width={74} />
+              <Tooltip contentStyle={C.tip} labelFormatter={(s) => mois(s)}
+                formatter={(v, name) => [eur(v),
+                  name === 'programme' ? 'avec croissance visée'
+                    : name === 'programme_plus' ? `en investissant +${extra} €/mois`
+                    : 'épargne seule']} />
+              {d.objectif > 0 && (
+                <ReferenceLine y={d.objectif} stroke={C.emerald} strokeDasharray="4 4"
+                  label={{ value: `objectif ${eur0(d.objectif)}`, position: 'insideTopRight',
+                    fontSize: 11, fill: C.emerald }} />
+              )}
+              <Area type="monotone" dataKey="programme" stroke={C.indigo}
+                strokeWidth={2} fill="url(#gp)" />
+              {extra > 0 && (
+                <Area type="monotone" dataKey="programme_plus" stroke={C.emerald}
+                  strokeWidth={2} fill="none" />
+              )}
+              <Area type="monotone" dataKey="epargne_seule" stroke={C.muted}
+                strokeWidth={1.5} strokeDasharray="5 4" fill="none" />
+            </AreaChart>
+          </ResponsiveContainer>
+          <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
+            Intérêts composés : chaque actif compose à sa croissance visée (page
+            Patrimoine) et ton épargne mensuelle est réputée investie au taux visé
+            moyen. Pointillés : la même épargne laissée à 0 % — l'écart entre les
+            deux courbes, ce sont les intérêts composés.
+            {extra > 0 && <> Trait vert : pareil, en investissant {extra} €/mois de plus.</>}
+            {!ccInclus && <> Comptes courants exclus{d.objectif > 0
+              && ' (l\'objectif, lui, porte sur le patrimoine total)'}.</>}
+            {' '}C'est une projection, pas une promesse.
+          </p>
+          {proj.taux_moyen === 0 && (
+            <p className="banner warn" style={{ fontSize: 12.5, marginTop: 10, marginBottom: 0 }}>
+              Taux visé moyen : 0 %/an — la courbe restera une droite tant qu'aucun
+              actif n'a de « croissance visée ». Renseigne-la sur ton PEA, tes livrets…
+              (Patrimoine → Éditer → Suivi de croissance & pays, ex : PEA 7, Livret A 1,7).
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Courbe d'évolution du solde liquide */}
       <div className="card" style={{ marginBottom: 18 }}>
         <h3>Évolution du solde liquide</h3>
@@ -344,6 +452,7 @@ export default function Dashboard({ goImport }) {
         {dep && (
           <p className="muted" style={{ fontSize: 12.5, margin: '10px 0 4px' }}>
             {periodeLabel(dep)} · total : <b>{eur(dep.total)}</b>
+            {' '}· clique une barre pour voir <b>où</b> l'argent est parti
           </p>
         )}
         {!dep || dep.categories.length === 0
@@ -358,13 +467,50 @@ export default function Dashboard({ goImport }) {
                 <YAxis type="category" dataKey="categorie" width={170}
                   tick={{ fontSize: 11.5, fill: C.ink }} />
                 <Tooltip formatter={(v) => eur(v)} contentStyle={C.tip} />
-                <Bar dataKey="montant" radius={[0, 4, 4, 0]}>
-                  {dep.categories.map((_, i) =>
-                    <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]} />)}
+                <Bar dataKey="montant" radius={[0, 4, 4, 0]} style={{ cursor: 'pointer' }}
+                  onClick={(e) => e && setSelCat(e.categorie === selCat ? null : e.categorie)}>
+                  {dep.categories.map((c, i) =>
+                    <Cell key={i} fill={CAT_COLORS[i % CAT_COLORS.length]}
+                      fillOpacity={selCat && selCat !== c.categorie ? 0.35 : 1} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
           )}
+
+        {/* Drill-down : dépenses par marchand dans la catégorie cliquée */}
+        {selCat && (
+          <div style={{ marginTop: 14, borderTop: '1px solid var(--surface-2)',
+            paddingTop: 12 }}>
+            <div className="row between" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <h3 style={{ marginBottom: 0 }}>Où ? · {selCat}</h3>
+              <button className="btn ghost" onClick={() => setSelCat(null)}>Fermer</button>
+            </div>
+            {!marchands
+              ? <p className="muted" style={{ padding: '12px 0' }}>Chargement…</p>
+              : marchands.marchands.length === 0
+                ? <p className="muted" style={{ padding: '12px 0' }}>
+                    Aucune dépense « {selCat} » sur cette période.</p>
+                : (
+                  <table style={{ marginTop: 8 }}>
+                    <thead><tr><th>Marchand</th>
+                      <th style={{ textAlign: 'right' }}>Fois</th>
+                      <th style={{ textAlign: 'right' }}>Total</th>
+                      <th style={{ textAlign: 'right' }}>Part</th></tr></thead>
+                    <tbody>
+                      {marchands.marchands.map((m, i) => (
+                        <tr key={i}>
+                          <td className="lib">{m.marchand}</td>
+                          <td className="num">{m.nb}×</td>
+                          <td className="num neg">−{eur(m.montant)}</td>
+                          <td className="num muted">
+                            {marchands.total ? Math.round((m.montant / marchands.total) * 100) : 0}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+          </div>
+        )}
       </div>
 
       {/* Abonnements détectés */}

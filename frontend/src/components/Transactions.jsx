@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { api, eur, dateFr } from '../lib/api.js'
-import { Download, Check, Refund } from './icons.jsx'
+import { Download, Check, Refund, Link } from './icons.jsx'
 
 // État de vérification d'une opération : vide (non catégorisée),
 // auto (catégorie posée par règle/cache/Ollama, à vérifier), ok (confirmée).
@@ -88,6 +88,72 @@ export default function Transactions({ onChange }) {
              total: items.reduce((s, t) => s + Math.abs(t.montant), 0) }
   }, [tx])
 
+  // Groupes de remboursement : N virements reçus remboursent N dépenses
+  // (mois différents acceptés). Sélection par « panier » : clique 🔗 sur
+  // chaque opération concernée, puis « Lier ». Même prorata que le backend :
+  // les virements s'effacent, les dépenses sont réduites au prorata.
+  const [panier, setPanier] = useState(() => new Set())
+  const [fLie, setFLie] = useState(false)        // ne montrer que les liées
+  const liens = useMemo(() => {
+    const groupes = new Map()
+    for (const t of tx || []) {
+      if (!t.lien_groupe) continue
+      if (!groupes.has(t.lien_groupe)) groupes.set(t.lien_groupe, [])
+      groupes.get(t.lien_groupe).push(t)
+    }
+    // net : op_id -> {montant net, rembourse?, drop?} ; partenaires : tooltip
+    const net = new Map(), partenaires = new Map()
+    let n = 0
+    for (const items of groupes.values()) {
+      const virements = items.filter((t) => t.montant > 0)
+        .sort((a, b) => b.montant - a.montant)
+      const depenses = items.filter((t) => t.montant < 0)
+      if (!virements.length || !depenses.length) continue
+      n += items.length
+      const recu = virements.reduce((s, t) => s + t.montant, 0)
+      const du = depenses.reduce((s, t) => s - t.montant, 0)
+      const utilise = Math.min(recu, du)
+      for (const t of items)
+        partenaires.set(t.op_id, items.filter((x) => x.op_id !== t.op_id)
+          .map((x) => x.libelle).join(' · '))
+      for (const t of depenses) {
+        const part = utilise * (-t.montant) / du
+        net.set(t.op_id, { montant: t.montant + part, rembourse: part })
+      }
+      const reste = recu - utilise
+      virements.forEach((t, i) => net.set(t.op_id,
+        i === 0 && reste > 0 ? { montant: reste, reste: true } : { drop: true }))
+    }
+    return { net, partenaires, n }
+  }, [tx])
+
+  const togglePanier = (t) => setPanier((prev) => {
+    const next = new Set(prev)
+    next.has(t.op_id) ? next.delete(t.op_id) : next.add(t.op_id)
+    return next
+  })
+  const lierPanier = async () => {
+    try {
+      const r = await api.lierOps([...panier])
+      setPanier(new Set())
+      setMsg(`${r.n} opérations liées — les stats comptent maintenant le net.`)
+      await load()
+    } catch (e) { setMsg(e.message) }
+  }
+  const delier = async (t) => {
+    try { await api.delierOp(t.op_id); await load() } catch (e) { setMsg(e.message) }
+  }
+
+  const txById = useMemo(() => new Map((tx || []).map((t) => [t.op_id, t])), [tx])
+  // Aperçu du panier : sélection valide = au moins 1 dépense + 1 virement reçu.
+  const panierInfo = useMemo(() => {
+    const items = [...panier].map((id) => txById.get(id)).filter(Boolean)
+    const recu = items.filter((t) => t.montant > 0).reduce((s, t) => s + t.montant, 0)
+    const paye = items.filter((t) => t.montant < 0).reduce((s, t) => s - t.montant, 0)
+    return { items, recu, paye, net: paye - recu,
+             valide: items.length >= 2 && recu > 0 && paye > 0 }
+  }, [panier, txById])
+
   const [debut, fin] = bounds(periode, dec)
 
   const rows = useMemo(() => (tx || []).filter((t) => {
@@ -98,6 +164,7 @@ export default function Transactions({ onChange }) {
       (fSens === 'tout' || (fSens === 'depenses' ? t.montant < 0 : t.montant >= 0)) &&
       (fConf === 'tout' || (fConf === 'ok' ? etat(t) === 'ok' : etat(t) !== 'ok')) &&
       (!fDu || t.a_rembourser) &&
+      (!fLie || t.lien_groupe) &&
       (!fMods || modMap.has(t.op_id)) &&
       (!q || t.libelle.toLowerCase().includes(q.toLowerCase()))
   }).sort((a, b) => {
@@ -108,14 +175,20 @@ export default function Transactions({ onChange }) {
     // texte (catégorie, libellé) : alphabétique, puis date récente à égalité
     return a[tri.key].localeCompare(b[tri.key], 'fr') * tri.dir
       || (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)
-  }), [tx, debut, fin, fSource, fCat, fSens, fConf, fDu, fMods, modMap, q, tri])
+  }), [tx, debut, fin, fSource, fCat, fSens, fConf, fDu, fLie, liens, fMods, modMap, q, tri])
 
-  // Synthèse de la sélection courante : entrées / sorties / net.
+  // Synthèse de la sélection courante : entrées / sorties / net, en montants
+  // NETS (virements liés effacés, dépenses liées réduites au prorata).
   const totaux = useMemo(() => {
     let entrees = 0, sorties = 0
-    for (const t of rows) t.montant >= 0 ? entrees += t.montant : sorties -= t.montant
+    for (const t of rows) {
+      const a = liens.net.get(t.op_id)
+      if (a?.drop) continue
+      const m = a ? a.montant : t.montant
+      m >= 0 ? entrees += m : sorties -= m
+    }
     return { entrees, sorties, net: entrees - sorties }
-  }, [rows])
+  }, [rows, liens])
 
   const recat = async (op_id, categorie) => {
     await api.setCategory(op_id, categorie)
@@ -200,6 +273,46 @@ export default function Transactions({ onChange }) {
       </div>
 
       {msg && <div className="banner" style={{ marginBottom: 16 }}>{msg}</div>}
+
+      {/* Panier de liaison : ajoute autant de dépenses et de virements reçus
+          que tu veux (mois différents ok), puis « Lier ». */}
+      {panier.size > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="row between" style={{ flexWrap: 'wrap', gap: 8 }}>
+            <h3 style={{ marginBottom: 0 }}>
+              Lier des opérations · {panierInfo.items.length} sélectionnée{panierInfo.items.length > 1 ? 's' : ''}</h3>
+            <span className="row" style={{ gap: 8 }}>
+              <button className="btn primary" onClick={lierPanier}
+                disabled={!panierInfo.valide}
+                title={panierInfo.valide ? 'Créer le groupe de remboursement'
+                  : 'Il faut au moins une dépense ET un virement reçu'}>
+                Lier {panierInfo.items.length} opérations</button>
+              <button className="btn ghost" onClick={() => setPanier(new Set())}>
+                Vider</button>
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: '10px 0' }}>
+            {panierInfo.items.map((t) => (
+              <button key={t.op_id} className="btn" style={{ fontSize: 12 }}
+                onClick={() => togglePanier(t)} title="Retirer de la sélection">
+                {dateFr(t.date)} · {t.libelle.slice(0, 34)}{t.libelle.length > 34 ? '…' : ''}
+                {' '}<b className={t.montant >= 0 ? 'pos' : 'neg'}>
+                  {t.montant >= 0 ? '+' : '−'}{eur(Math.abs(t.montant))}</b> ✕
+              </button>
+            ))}
+          </div>
+          <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+            {panierInfo.valide
+              ? <>Dépensé <b className="neg">−{eur(panierInfo.paye)}</b> · remboursé{' '}
+                  <b className="pos">+{eur(panierInfo.recu)}</b> → les stats compteront{' '}
+                  <b>{panierInfo.net >= 0 ? '−' : '+'}{eur(Math.abs(panierInfo.net))}</b>,
+                  réparti sur les dépenses au prorata.</>
+              : <>Ajoute encore {panierInfo.paye <= 0 ? 'une dépense' : 'un virement reçu'}
+                  {' '}avec l'icône 🔗 (utilise la recherche et les filtres — toutes
+                  les périodes sont acceptées).</>}
+          </p>
+        </div>
+      )}
 
       {/* Contrôle du dernier réexamen : retrouver exactement ce qu'il a changé */}
       {mods?.length > 0 && (
@@ -290,6 +403,18 @@ export default function Transactions({ onChange }) {
               <Refund /> À rembourser · {eur(du.total)}
             </button>
           )}
+          {(liens.n > 0 || fLie) && (
+            <button className={'btn' + (fLie ? ' primary' : '')}
+              title={fLie ? 'Revoir toutes les opérations'
+                : 'Voir les dépenses remboursées et leurs virements liés'}
+              onClick={() => {
+                const v = !fLie
+                setFLie(v)
+                if (v) { setPeriode('toujours'); setDec(0) }  // les liens traversent les mois
+              }}>
+              <Link /> Liées · {liens.n}
+            </button>
+          )}
         </div>
 
         <table>
@@ -309,7 +434,8 @@ export default function Transactions({ onChange }) {
                 onClick={() => setTri((t) => ({ key: 'montant', dir: t.key === 'montant' ? -t.dir : -1 }))}>
                 Montant{tri.key === 'montant' ? (tri.dir === -1 ? ' ▼' : ' ▲') : ''}</th>
               <th title="Catégorie vérifiée ?" style={{ textAlign: 'center' }}>✓</th>
-              <th title="À te faire rembourser ?" style={{ textAlign: 'center' }}>Dû</th></tr>
+              <th title="Dépense : à te faire rembourser ? · Virement reçu : lier à la dépense qu'il rembourse"
+                style={{ textAlign: 'center' }}>Dû</th></tr>
           </thead>
           <tbody>
             {rows.slice(0, 400).map((t) => {
@@ -326,7 +452,10 @@ export default function Transactions({ onChange }) {
                   <td className="num muted" style={{ textAlign: 'left' }}>
                     {dateFr(t.date)}</td>
                   <td className="lib">{t.libelle}
-                    {t.a_rembourser ? <span className="due-pill">à rembourser</span> : null}</td>
+                    {t.a_rembourser ? <span className="due-pill">à rembourser</span> : null}
+                    {t.lien_groupe ? <span className="due-pill"
+                      title={`Groupe de remboursement, avec : ${liens.partenaires.get(t.op_id) || '(incomplet)'}`}>
+                      lié ↩</span> : null}</td>
                   <td><span className="src-tag">{t.source}</span></td>
                   <td>
                     <select value={t.categorie} className={'cat-' + e}
@@ -338,8 +467,31 @@ export default function Transactions({ onChange }) {
                         avant : {modMap.get(t.op_id).avant}</div>
                     )}
                   </td>
-                  <td className={'num ' + (t.montant >= 0 ? 'pos' : 'neg')}>
-                    {t.montant >= 0 ? '+' : '−'}{eur(Math.abs(t.montant))}
+                  <td className="num">
+                    {(() => {
+                      const a = liens.net.get(t.op_id)
+                      // virement absorbé par le groupe : neutralisé
+                      if (a?.drop) return (
+                        <span className="muted" style={{ textDecoration: 'line-through' }}
+                          title="Compté dans le net des dépenses du groupe">
+                          +{eur(t.montant)}</span>)
+                      // virement partiellement utilisé : il en reste en revenu
+                      if (a?.reste) return <>
+                        <span className="pos">+{eur(a.montant)}</span>
+                        <div className="muted" style={{ fontSize: 11 }}>
+                          sur +{eur(t.montant)} reçus (le reste rembourse le groupe)</div>
+                      </>
+                      // dépense remboursée : le paiement « passe » au net (50 → 25)
+                      if (a) return <>
+                        <span className={a.montant >= 0 ? 'pos' : 'neg'}>
+                          {a.montant >= 0 ? '+' : '−'}{eur(Math.abs(a.montant))}</span>
+                        <div className="muted" style={{ fontSize: 11 }}>
+                          payé −{eur(Math.abs(t.montant))}, remboursé +{eur(a.rembourse)}</div>
+                      </>
+                      return (
+                        <span className={t.montant >= 0 ? 'pos' : 'neg'}>
+                          {t.montant >= 0 ? '+' : '−'}{eur(Math.abs(t.montant))}</span>)
+                    })()}
                   </td>
                   <td style={{ textAlign: 'center', width: 34 }}>
                     <button className={'confirm-btn' + (e === 'ok' ? ' on' : '')}
@@ -350,7 +502,7 @@ export default function Transactions({ onChange }) {
                       <Check size={16} />
                     </button>
                   </td>
-                  <td style={{ textAlign: 'center', width: 34 }}>
+                  <td style={{ textAlign: 'center', whiteSpace: 'nowrap', width: 1 }}>
                     {t.montant < 0 && (
                       <button className={'due-btn' + (t.a_rembourser ? ' on' : '')}
                         onClick={() => toggleDue(t)}
@@ -360,6 +512,16 @@ export default function Transactions({ onChange }) {
                         <Refund size={15} />
                       </button>
                     )}
+                    <button
+                      className={'due-btn' + (t.lien_groupe || panier.has(t.op_id) ? ' on' : '')}
+                      onClick={() => t.lien_groupe ? delier(t) : togglePanier(t)}
+                      title={t.lien_groupe
+                        ? `Lié avec : ${liens.partenaires.get(t.op_id) || '?'} — cliquer pour retirer cette opération du groupe`
+                        : panier.has(t.op_id)
+                          ? 'Retirer de la sélection à lier'
+                          : 'Ajouter à la sélection à lier (dépenses ↔ virements reçus, mois différents ok)'}>
+                      <Link size={15} />
+                    </button>
                   </td>
                 </tr>
               )

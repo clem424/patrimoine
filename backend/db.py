@@ -145,6 +145,27 @@ def init_db():
         if "a_rembourser" not in _cols(conn, "transactions"):
             conn.execute("ALTER TABLE transactions ADD COLUMN"
                          " a_rembourser INTEGER NOT NULL DEFAULT 0")
+        # Groupes de remboursement : opérations partageant un `lien_groupe`
+        # (N virements reçus remboursent N dépenses ; les stats comptent le net).
+        # Remplace l'ancien lien 1→1 `lie_a`, converti puis supprimé.
+        tcols = _cols(conn, "transactions")
+        if "lien_groupe" not in tcols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN lien_groupe TEXT")
+            if "lie_a" in tcols:
+                for r in conn.execute("SELECT user_id, op_id, lie_a FROM transactions"
+                                      " WHERE lie_a IS NOT NULL").fetchall():
+                    conn.execute("UPDATE transactions SET lien_groupe=?"
+                                 " WHERE user_id=? AND op_id IN (?,?)",
+                                 (f"g-{r['lie_a']}", r["user_id"], r["op_id"], r["lie_a"]))
+                conn.execute("ALTER TABLE transactions DROP COLUMN lie_a")
+        # Suivi de croissance et diversification des actifs.
+        acols = _cols(conn, "manual_assets")
+        for col, ddl in (("prix_achat", "REAL"),          # total investi (€)
+                         ("date_achat", "TEXT"),          # YYYY-MM-DD
+                         ("pays", "TEXT DEFAULT ''"),     # diversification géographique
+                         ("croissance_pct", "REAL")):     # croissance visée (%/an)
+            if col not in acols:
+                conn.execute(f"ALTER TABLE manual_assets ADD COLUMN {col} {ddl}")
 
 
 # ------------------------------------------------------------ migrations ---- #
@@ -364,6 +385,43 @@ def get_transaction(uid: int, op_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def set_link_group(uid: int, op_ids: list[str], gid: str):
+    """Réunit des opérations dans un groupe de remboursement. Si certaines
+    étaient déjà liées, leurs groupes entiers sont fusionnés dans le nouveau."""
+    marks = ",".join("?" * len(op_ids))
+    with get_db() as conn:
+        anciens = [r["lien_groupe"] for r in conn.execute(
+            f"SELECT DISTINCT lien_groupe FROM transactions WHERE user_id=?"
+            f" AND op_id IN ({marks}) AND lien_groupe IS NOT NULL",
+            (uid, *op_ids))]
+        if anciens:
+            conn.execute(
+                f"UPDATE transactions SET lien_groupe=? WHERE user_id=?"
+                f" AND lien_groupe IN ({','.join('?' * len(anciens))})",
+                (gid, uid, *anciens))
+        conn.execute(f"UPDATE transactions SET lien_groupe=? WHERE user_id=?"
+                     f" AND op_id IN ({marks})", (gid, uid, *op_ids))
+
+
+def unlink_op(uid: int, op_id: str):
+    """Retire une opération de son groupe ; dissout le groupe s'il ne reste
+    plus au moins une dépense ET un virement reçu."""
+    with get_db() as conn:
+        row = conn.execute("SELECT lien_groupe FROM transactions"
+                           " WHERE user_id=? AND op_id=?", (uid, op_id)).fetchone()
+        gid = row["lien_groupe"] if row else None
+        if not gid:
+            return
+        conn.execute("UPDATE transactions SET lien_groupe=NULL"
+                     " WHERE user_id=? AND op_id=?", (uid, op_id))
+        reste = conn.execute("SELECT montant FROM transactions WHERE user_id=?"
+                             " AND lien_groupe=?", (uid, gid)).fetchall()
+        if (len(reste) < 2 or not any(r["montant"] > 0 for r in reste)
+                or not any(r["montant"] < 0 for r in reste)):
+            conn.execute("UPDATE transactions SET lien_groupe=NULL"
+                         " WHERE user_id=? AND lien_groupe=?", (uid, gid))
+
+
 def set_due(uid: int, op_id: str, du: bool):
     """Marque/démarque une opération « à rembourser » (quelqu'un te doit ce montant)."""
     with get_db() as conn:
@@ -508,22 +566,26 @@ def upsert_asset(uid: int, data: dict) -> int:
     src = data.get("source", "manuel")
     comm = data.get("commentaire", "") or ""
     with get_db() as conn:
+        suivi = (data.get("prix_achat"), data.get("date_achat"),
+                 data.get("pays", "") or "", data.get("croissance_pct"))
         if data.get("id"):
             conn.execute(
                 """UPDATE manual_assets
                    SET type=?, nom=?, valeur=?, quantite=?, ticker=?, source=?,
-                       commentaire=?, updated_at=?
+                       commentaire=?, prix_achat=?, date_achat=?, pays=?,
+                       croissance_pct=?, updated_at=?
                    WHERE id=? AND user_id=?""",
                 (data["type"], data["nom"], data.get("valeur", 0), data.get("quantite"),
-                 data.get("ticker"), src, comm, now, data["id"], uid),
+                 data.get("ticker"), src, comm, *suivi, now, data["id"], uid),
             )
             return data["id"]
         cur = conn.execute(
             """INSERT INTO manual_assets
-               (user_id, type, nom, valeur, quantite, ticker, source, commentaire, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               (user_id, type, nom, valeur, quantite, ticker, source, commentaire,
+                prix_achat, date_achat, pays, croissance_pct, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (uid, data["type"], data["nom"], data.get("valeur", 0), data.get("quantite"),
-             data.get("ticker"), src, comm, now),
+             data.get("ticker"), src, comm, *suivi, now),
         )
         return cur.lastrowid
 
@@ -615,6 +677,27 @@ def budget_set(uid: int, categorie: str, montant: float):
                          " VALUES (?,?,?)", (uid, categorie, montant))
         else:
             conn.execute("DELETE FROM budgets WHERE user_id=? AND categorie=?", (uid, categorie))
+
+
+# ----- croissance visée par classe d'actif (%/an, par profil) -----
+def class_growth_list(uid: int) -> dict[str, float]:
+    """{slug de classe: %/an} — hérité par les actifs de la classe qui n'ont
+    pas de croissance_pct propre (l'actif prime sur sa classe)."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT cle, valeur FROM settings WHERE cle LIKE ?",
+                            (f"croissance_type:{uid}:%",)).fetchall()
+        return {r["cle"].split(":", 2)[2]: float(r["valeur"])
+                for r in rows if r["valeur"]}
+
+
+def class_growth_set(uid: int, slug: str, pct: float | None):
+    cle = f"croissance_type:{uid}:{slug}"
+    with get_db() as conn:
+        if pct is None:
+            conn.execute("DELETE FROM settings WHERE cle=?", (cle,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO settings (cle, valeur) VALUES (?,?)",
+                         (cle, str(pct)))
 
 
 # ----- réglages (clé/valeur) -----

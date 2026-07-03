@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import secrets
 import datetime as dt
 from collections import defaultdict
 from pathlib import Path
@@ -154,6 +155,40 @@ def mark_due(op_id: str, body: DueBody, user: dict = User):
     return {"ok": True}
 
 
+class LierBody(BaseModel):
+    op_ids: list[str]           # au moins une dépense ET un virement reçu
+
+
+@app.post("/api/transactions/lier")
+def lier_transactions(body: LierBody, user: dict = User):
+    """Réunit des opérations dans un groupe de remboursement (N virements reçus
+    remboursent N dépenses, mois différents acceptés) : les statistiques ne
+    comptent plus que le net, réparti sur les dépenses au prorata. Lier une
+    opération déjà liée fusionne les groupes."""
+    uid = user["id"]
+    ids = list(dict.fromkeys(body.op_ids))
+    if len(ids) < 2:
+        raise HTTPException(400, "Sélectionne au moins deux opérations")
+    txs = [db.get_transaction(uid, i) for i in ids]
+    if any(t is None for t in txs):
+        raise HTTPException(404, "Opération inconnue dans la sélection")
+    if not any(t["montant"] > 0 for t in txs) or not any(t["montant"] < 0 for t in txs):
+        raise HTTPException(400, "Il faut au moins une dépense ET un virement reçu")
+    gid = "g-" + secrets.token_hex(6)
+    db.set_link_group(uid, ids, gid)
+    return {"groupe": gid, "n": len(ids)}
+
+
+@app.post("/api/transactions/{op_id}/delier")
+def delier_transaction(op_id: str, user: dict = User):
+    """Retire l'opération de son groupe de remboursement (le groupe est dissous
+    s'il ne reste plus les deux sens)."""
+    if not db.get_transaction(user["id"], op_id):
+        raise HTTPException(404, "Opération inconnue")
+    db.unlink_op(user["id"], op_id)
+    return {"ok": True}
+
+
 class ConfirmBody(BaseModel):
     confirme: bool
 
@@ -280,6 +315,10 @@ class Asset(BaseModel):
     ticker: str | None = None
     source: str = "manuel"
     commentaire: str = ""
+    prix_achat: float | None = None      # total investi -> suivi de plus-value
+    date_achat: str | None = None        # YYYY-MM-DD -> croissance annualisée
+    pays: str = ""                       # diversification géographique
+    croissance_pct: float | None = None  # croissance visée (%/an) -> projection
 
 
 def _known_types(uid: int) -> set[str]:
@@ -365,6 +404,27 @@ def asset_type_delete(slug: str, user: dict = User):
     used = db.delete_asset_type(user["id"], slug)
     if used:
         raise HTTPException(400, f"{used} actif(s) utilisent encore ce type")
+    return {"ok": True}
+
+
+class ClassGrowth(BaseModel):
+    slug: str
+    pct: float | None = None    # None ou 0 -> efface (retour à « pas de croissance »)
+
+
+@app.get("/api/croissance-classes")
+def class_growth_get(user: dict = User):
+    """Croissance visée par classe d'actif : {slug: %/an}. Héritée par les
+    actifs de la classe sans croissance propre (l'actif prime)."""
+    return db.class_growth_list(user["id"])
+
+
+@app.put("/api/croissance-classes")
+def class_growth_put(body: ClassGrowth, user: dict = User):
+    uid = user["id"]
+    if body.slug not in _known_types(uid):
+        raise HTTPException(400, "Classe d'actif inconnue")
+    db.class_growth_set(uid, body.slug, body.pct if body.pct else None)
     return {"ok": True}
 
 
@@ -460,15 +520,24 @@ def _assets_with_live_prices(uid: int):
     stock_syms = [a["ticker"] for a in assets if a["type"] == "pea" and a["ticker"]]
     cprices = crypto.get_prices_eur(crypto_ids) if crypto_ids else {}
     sprices = stocks.get_prices_eur(stock_syms) if stock_syms else {}
+    croissance_classes = db.class_growth_list(uid)
     out = []
     for a in assets:
         a = dict(a)
+        a["croissance_classe"] = croissance_classes.get(a["type"])
         if a["type"] == "crypto" and a.get("ticker") in cprices and a.get("quantite"):
             a["cours"] = cprices[a["ticker"]]
             a["valeur"] = round(a["cours"] * a["quantite"], 2)
         elif a["type"] == "pea" and a.get("ticker") in sprices and a.get("quantite"):
             a["cours"] = sprices[a["ticker"]]
             a["valeur"] = round(a["cours"] * a["quantite"], 2)
+        # Suivi de croissance : plus-value et %/an réel depuis le prix d'achat.
+        if a.get("prix_achat"):
+            val = a.get("valeur") or 0
+            a["plus_value"] = round(val - a["prix_achat"], 2)
+            a["perf_pct"] = round(100 * (val / a["prix_achat"] - 1), 1)
+            a["perf_annuelle"] = analytics.perf_annualisee(
+                a["prix_achat"], val, a.get("date_achat"))
         out.append(a)
     return out
 
@@ -481,11 +550,24 @@ def depenses(periode: str = "toujours", decalage: int = 0, user: dict = User):
     if periode not in ("semaine", "mois", "annee", "toujours"):
         raise HTTPException(400, "Période inconnue")
     debut, fin = analytics.period_bounds(periode, decalage)
-    tx = db.fetch_transactions(user["id"])
+    tx = analytics.apply_links(db.fetch_transactions(user["id"]))
     cats = analytics.spending_by_category(tx, debut, fin)
     return {"periode": periode, "decalage": decalage, "debut": debut, "fin": fin,
             "categories": cats,
             "total": round(sum(c["montant"] for c in cats), 2)}
+
+
+@app.get("/api/depenses/marchands")
+def depenses_marchands(categorie: str, periode: str = "toujours", decalage: int = 0,
+                       user: dict = User):
+    """Dépenses d'une catégorie ventilées par marchand (même fenêtre que /api/depenses)."""
+    if periode not in ("semaine", "mois", "annee", "toujours"):
+        raise HTTPException(400, "Période inconnue")
+    debut, fin = analytics.period_bounds(periode, decalage)
+    tx = analytics.apply_links(db.fetch_transactions(user["id"]))
+    rows = analytics.spending_by_merchant(tx, categorie, debut, fin)
+    return {"categorie": categorie, "debut": debut, "fin": fin, "marchands": rows,
+            "total": round(sum(r["montant"] for r in rows), 2)}
 
 
 class BudgetLine(BaseModel):
@@ -498,7 +580,7 @@ def budget_get(mois: str | None = None, user: dict = User):
     """Budgets mensuels + dépenses réelles du mois demandé (défaut : mois courant)."""
     uid = user["id"]
     mois = mois or dt.date.today().strftime("%Y-%m")
-    tx = db.fetch_transactions(uid)
+    tx = analytics.apply_links(db.fetch_transactions(uid))
     return analytics.budget_status(tx, db.budget_list(uid), mois)
 
 
@@ -517,6 +599,10 @@ def dashboard(user: dict = User):
     uid = user["id"]
     assets = _assets_with_live_prices(uid)
     tx = db.fetch_transactions(uid)
+    # Statistiques sur les montants NETS : un remboursement lié réduit sa dépense
+    # au lieu de compter comme un revenu. La courbe de solde reste sur les flux
+    # bruts (l'argent est réellement passé sur le compte).
+    tx_net = analytics.apply_links(tx)
 
     patrimoine, repartition = analytics.repartition_par_classe(assets, _type_labels(uid))
     # Relevé quotidien : l'historique du patrimoine total se construit au fil
@@ -529,16 +615,51 @@ def dashboard(user: dict = User):
         "repartition": repartition,
         "courbe_patrimoine": analytics.liquid_balance_series(tx, assets),
         "historique": db.snapshot_list(uid),
-        "kpis": analytics.kpis(tx, patrimoine),
+        "kpis": analytics.kpis(tx_net, patrimoine),
         "objectif": float(objectif) if objectif else None,
-        "flux_mensuel": analytics.monthly_cashflow(tx),
-        "depenses_categorie": analytics.spending_by_category(tx),
+        "flux_mensuel": analytics.monthly_cashflow(tx_net),
+        "depenses_categorie": analytics.spending_by_category(tx_net),
         "abonnements": analytics.detect_subscriptions(tx),
-        "budget": analytics.budget_status(tx, db.budget_list(uid),
+        "budget": analytics.budget_status(tx_net, db.budget_list(uid),
                                           dt.date.today().strftime("%Y-%m")),
         "nb_transactions": len(tx),
         "non_categorise": sum(1 for t in tx if t["categorie"] == "Non catégorisé"),
     }
+
+
+@app.get("/api/projection")
+def projection(annees: int = 10, extra: float = 0, courants: bool = False,
+               user: dict = User):
+    """Patrimoine projeté : croissance visée de chaque actif + épargne mensuelle
+    moyenne (KPIs). `extra` €/mois investis en plus -> série comparative
+    « si j'investissais plus ». Les comptes courants (liquidités de passage,
+    solde fluctuant, 0 % de croissance) sont exclus sauf `courants=true` :
+    ils diluent le taux moyen sans rien projeter. `annees` borné à [1, 30]."""
+    uid = user["id"]
+    annees = max(1, min(30, annees))
+    extra = max(0.0, min(100000.0, extra))
+    assets = _assets_with_live_prices(uid)
+    tx_net = analytics.apply_links(db.fetch_transactions(uid))
+    patrimoine, _ = analytics.repartition_par_classe(assets, _type_labels(uid))
+    k = analytics.kpis(tx_net, patrimoine)
+    epargne = k["epargne_mensuelle"] if k else 0.0
+    if not courants:
+        assets = [a for a in assets if a["type"] != "compte_courant"]
+    # Taux effectif : croissance propre de l'actif, sinon celle de sa classe.
+    assets = [{**a, "croissance_pct": a["croissance_pct"]
+               if a.get("croissance_pct") is not None else a.get("croissance_classe")}
+              for a in assets]
+    out = analytics.projection_patrimoine(assets, epargne, annees, extra)
+    out["courants_inclus"] = courants
+    objectif = db.setting_get(f"objectif:{uid}")
+    out["objectif"] = float(objectif) if objectif else None
+    return out
+
+
+@app.get("/api/patrimoine/pays")
+def patrimoine_pays(user: dict = User):
+    """Diversification géographique : valeur des actifs par pays."""
+    return analytics.repartition_par_pays(_assets_with_live_prices(user["id"]))
 
 
 # ----------------------------------------------- OBJECTIF & EXPORT CSV ---- #

@@ -59,6 +59,8 @@ export const api = {
     q(`/api/transactions/${opId}/confirm`, POST({ confirme })),
   setDue: (opId, du) =>
     q(`/api/transactions/${opId}/rembourser`, POST({ du })),
+  lierOps:  (op_ids) => q('/api/transactions/lier', POST({ op_ids })),
+  delierOp: (opId) => q(`/api/transactions/${opId}/delier`, { method: 'POST' }),
 
   saveAsset:   (a) => q('/api/assets', POST(a)),
   deleteAsset: (id) => q(`/api/assets/${id}`, { method: 'DELETE' }),
@@ -96,6 +98,15 @@ export const api = {
   toggleMask:      (id) => q(`/api/assets/${id}/masque`, { method: 'PATCH' }),
   depenses:        (periode, decalage = 0) =>
     q(`/api/depenses?periode=${periode}&decalage=${decalage}`),
+  depensesMarchands: (categorie, periode, decalage = 0) =>
+    q(`/api/depenses/marchands?categorie=${encodeURIComponent(categorie)}`
+      + `&periode=${periode}&decalage=${decalage}`),
+  projection:      (annees = 10, extra = 0, courants = false) =>
+    q(`/api/projection?annees=${annees}&extra=${extra}&courants=${courants}`),
+  patrimoinePays:  () => q('/api/patrimoine/pays'),
+  croissanceClasses: () => q('/api/croissance-classes'),
+  setCroissanceClasse: (slug, pct) => q('/api/croissance-classes',
+    { method: 'PUT', body: JSON.stringify({ slug, pct }) }),
   budgetGet:       (mois) => q('/api/budget' + (mois ? `?mois=${mois}` : '')),
   budgetSet:       (categorie, montant) => q('/api/budget',
     { method: 'PUT', body: JSON.stringify({ categorie, montant }) }),

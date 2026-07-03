@@ -3,7 +3,15 @@ import { api, eur, eurAsset, classColor, applyTypeColors } from '../lib/api.js'
 import Pyramide from './Pyramide.jsx'
 import { Eye, EyeOff } from './icons.jsx'
 
-const blank = { type: 'livret_a', nom: '', valeur: '', quantite: '', ticker: '', commentaire: '' }
+const blank = { type: 'livret_a', nom: '', valeur: '', quantite: '', ticker: '',
+  commentaire: '', prix_achat: '', date_achat: '', pays: '', croissance_pct: '' }
+
+const PAYS_COLORS = ['#3A55C4', '#16887A', '#BE862C', '#BC4A33', '#6A7BE6',
+  '#54A89B', '#9B6BD0', '#8A93A6']
+
+// pourcentage signé, 1 décimale : +12,3 % / −4 %
+const pct = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toLocaleString('fr-FR',
+  { maximumFractionDigits: 1 }) + ' %'
 
 // Regroupe par classe, trie les items par valeur puis les classes par poids total.
 function groupAssets(assets) {
@@ -37,14 +45,43 @@ export default function Patrimoine({ onChange }) {
 
   const typeLabel = Object.fromEntries(types.map((t) => [t.slug, t.label]))
 
+  // Croissance visée par classe (héritée par les actifs sans croissance propre)
+  const [growth, setGrowth] = useState({})
+  const saveGrowth = async (slug, val) => {
+    const pct = val === '' ? null : parseFloat(val)
+    try {
+      await api.setCroissanceClasse(slug, pct)
+      setGrowth((g) => ({ ...g, [slug]: pct || undefined }))
+      await load()                       // rafraîchit croissance_classe des actifs
+    } catch (e) { setMsg(e.message) }
+  }
+
   const load = () => api.assets().then(setAssets)
   const loadTypes = () => api.assetTypes().then((ts) => { setTypes(ts); applyTypeColors(ts) })
   useEffect(() => {
     load(); loadTypes()
+    api.croissanceClasses().then(setGrowth).catch(() => {})
     api.binanceStatus().then((s) => setBinanceOn(s.configured)).catch(() => {})
   }, [])
 
   const total = (assets || []).reduce((s, a) => s + (a.valeur || 0), 0)
+
+  // Suivi de croissance : actifs dont le prix d'achat est renseigné.
+  const suivis = (assets || []).filter((a) => a.prix_achat)
+  const investi = suivis.reduce((s, a) => s + a.prix_achat, 0)
+  const valeurSuivie = suivis.reduce((s, a) => s + (a.valeur || 0), 0)
+
+  // Diversification géographique (champ pays libre ; vide -> Non renseigné).
+  // Comptes courants exclus : liquidités de passage, pas une exposition pays.
+  const horsCC = (assets || []).filter((a) => a.type !== 'compte_courant')
+  const totalPays = horsCC.reduce((s, a) => s + (a.valeur || 0), 0)
+  const parPays = Object.entries(horsCC.reduce((m, a) => {
+    const p = (a.pays || '').trim() || 'Non renseigné'
+    m[p] = (m[p] || 0) + (a.valeur || 0)
+    return m
+  }, {})).filter(([, v]) => v > 0)
+    .map(([pays, valeur]) => ({ pays, valeur }))
+    .sort((a, b) => b.valeur - a.valeur)
   // 'crypto' -> recherche CoinGecko ; 'pea' -> recherche titres Yahoo ; sinon saisie manuelle.
   const market = form.type === 'crypto' ? 'crypto' : form.type === 'pea' ? 'stock' : null
   const useTicker = market && form.ticker
@@ -73,6 +110,11 @@ export default function Patrimoine({ onChange }) {
       ticker: useTicker ? form.ticker : null,
       source: 'manuel',
       commentaire: form.commentaire || '',
+      prix_achat: parseFloat(form.prix_achat) || null,
+      date_achat: form.date_achat || null,
+      pays: (form.pays || '').trim(),
+      croissance_pct: form.croissance_pct === '' ? null
+        : parseFloat(form.croissance_pct),
     })
     setForm(blank); setResults([]); await load()
   }
@@ -83,6 +125,8 @@ export default function Patrimoine({ onChange }) {
     valeur: !a.ticker && a.quantite
       ? +((a.valeur || 0) / a.quantite).toFixed(2) : (a.valeur ?? ''),
     quantite: a.quantite ?? '', ticker: a.ticker ?? '', commentaire: a.commentaire ?? '',
+    prix_achat: a.prix_achat ?? '', date_achat: (a.date_achat || '').slice(0, 10),
+    pays: a.pays ?? '', croissance_pct: a.croissance_pct ?? '',
   })
   const remove = async (id) => { await api.deleteAsset(id); await load() }
 
@@ -180,6 +224,14 @@ export default function Patrimoine({ onChange }) {
                             {' '}· {a.ticker ? `${a.quantite} u.` : `× ${a.quantite}`}</span> : null}
                           {a.source && a.source !== 'manuel'
                             ? <span className="src-tag" style={{ marginLeft: 6 }}>{a.source}</span> : null}
+                          {a.prix_achat && !a.masque ? (
+                            <span className={a.plus_value >= 0 ? 'pos' : 'neg'}
+                              style={{ marginLeft: 6, fontSize: 12, fontFamily: 'var(--mono)' }}
+                              title={`Investi : ${eur(a.prix_achat)}`}>
+                              {a.plus_value >= 0 ? '+' : '−'}{eur(Math.abs(a.plus_value))}
+                              {' '}({pct(a.perf_pct)})
+                            </span>
+                          ) : null}
                           {a.commentaire
                             ? <div className="muted asset-note">{a.commentaire}</div> : null}
                         </td>
@@ -303,6 +355,50 @@ export default function Patrimoine({ onChange }) {
                 onChange={(e) => setForm({ ...form, commentaire: e.target.value })} />
             </label>
 
+            {/* Suivi de croissance & diversification (tout est optionnel) */}
+            <details open={!!(form.prix_achat || form.pays || form.croissance_pct)}>
+              <summary className="muted" style={{ cursor: 'pointer', fontSize: 12.5 }}>
+                Suivi de croissance & pays (optionnel)</summary>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+                <div className="row" style={{ gap: 10 }}>
+                  <label style={{ flex: 1 }}>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                      Prix d'achat total (€)</div>
+                    <input type="number" step="any" value={form.prix_achat}
+                      style={{ width: '100%' }} placeholder="ex : 1500"
+                      onChange={(e) => setForm({ ...form, prix_achat: e.target.value })} />
+                  </label>
+                  <label style={{ flex: 1 }}>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                      Date d'achat</div>
+                    <input type="date" value={form.date_achat} style={{ width: '100%' }}
+                      onChange={(e) => setForm({ ...form, date_achat: e.target.value })} />
+                  </label>
+                </div>
+                <div className="row" style={{ gap: 10 }}>
+                  <label style={{ flex: 1 }}>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                      Croissance visée (%/an)</div>
+                    <input type="number" step="any" value={form.croissance_pct}
+                      style={{ width: '100%' }}
+                      placeholder={growth[form.type] != null
+                        ? `classe : ${growth[form.type]}` : 'ex : 7'}
+                      onChange={(e) => setForm({ ...form, croissance_pct: e.target.value })} />
+                  </label>
+                  <label style={{ flex: 1 }}>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                      Pays</div>
+                    <input value={form.pays} style={{ width: '100%' }}
+                      placeholder="ex : France, USA, Monde…"
+                      onChange={(e) => setForm({ ...form, pays: e.target.value })} />
+                  </label>
+                </div>
+                <p className="muted" style={{ fontSize: 11.5, margin: 0 }}>
+                  Le prix d'achat suit la plus-value, la croissance visée alimente le
+                  patrimoine projeté (tableau de bord), le pays la diversification.</p>
+              </div>
+            </details>
+
             <div className="row" style={{ gap: 8 }}>
               <button className="btn primary" onClick={save}>
                 {form.id ? 'Enregistrer' : 'Ajouter'}</button>
@@ -312,6 +408,110 @@ export default function Patrimoine({ onChange }) {
           </div>
         </div>
       </div>
+
+      {/* Croissance visée par classe : héritée par les actifs de la classe */}
+      {assets.length > 0 && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <h3>Croissance visée par classe d'actif</h3>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+            S'applique à tous les actifs de la classe dans le <b>patrimoine projeté</b>
+            {' '}(un actif avec sa propre croissance visée garde la sienne). Vide = 0 %.
+          </p>
+          <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
+            {groupAssets(assets)
+              .filter((g) => g.type !== 'compte_courant')
+              .map((g) => (
+                <label key={g.type} className="row" style={{ gap: 8 }}>
+                  <span className="swatch" style={{ width: 10, height: 10,
+                    borderRadius: 3, background: classColor(g.type) }} />
+                  <span style={{ fontSize: 13 }}>{typeLabel[g.type] || g.type}</span>
+                  <input type="number" step="any" placeholder="0"
+                    key={`${g.type}:${growth[g.type] ?? ''}`}
+                    defaultValue={growth[g.type] ?? ''}
+                    style={{ width: 72, textAlign: 'right' }}
+                    onBlur={(e) => (parseFloat(e.target.value) || null)
+                      !== (growth[g.type] ?? null) && saveGrowth(g.type, e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && e.target.blur()} />
+                  <span className="muted" style={{ fontSize: 12 }}>%/an</span>
+                </label>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Croissance des actifs : investi vs valeur, %/an réel vs visé */}
+      {suivis.length > 0 && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <h3>Croissance des actifs</h3>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+            Investi : <b>{eur(investi)}</b> · valeur actuelle :{' '}
+            <b>{eur(valeurSuivie)}</b> · plus-value :{' '}
+            <b className={valeurSuivie - investi >= 0 ? 'pos' : 'neg'}>
+              {valeurSuivie - investi >= 0 ? '+' : '−'}{eur(Math.abs(valeurSuivie - investi))}
+            </b>
+          </p>
+          <table>
+            <thead><tr><th>Actif</th>
+              <th style={{ textAlign: 'right' }}>Investi</th>
+              <th style={{ textAlign: 'right' }}>Valeur</th>
+              <th style={{ textAlign: 'right' }}>Plus-value</th>
+              <th style={{ textAlign: 'right' }} title="Croissance annualisée réelle depuis la date d'achat">Réel %/an</th>
+              <th style={{ textAlign: 'right' }} title="Croissance visée saisie sur l'actif">Visé %/an</th></tr></thead>
+            <tbody>
+              {suivis.map((a) => (
+                <tr key={a.id}>
+                  <td>{a.nom}</td>
+                  <td className="num">{a.masque ? '••••' : eur(a.prix_achat)}</td>
+                  <td className="num">{eurAsset(a)}</td>
+                  <td className={'num ' + (a.plus_value >= 0 ? 'pos' : 'neg')}>
+                    {a.masque ? '••••' : <>{a.plus_value >= 0 ? '+' : '−'}
+                      {eur(Math.abs(a.plus_value))} ({pct(a.perf_pct)})</>}</td>
+                  <td className={'num ' + (a.perf_annuelle == null ? 'muted'
+                    : a.perf_annuelle >= 0 ? 'pos' : 'neg')}>
+                    {a.perf_annuelle == null ? '—' : pct(a.perf_annuelle)}</td>
+                  <td className="num muted">
+                    {a.croissance_pct != null ? pct(a.croissance_pct)
+                      : a.croissance_classe != null
+                        ? <>{pct(a.croissance_classe)} <span style={{ opacity: .65 }}>(classe)</span></>
+                        : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
+            « Réel %/an » n'apparaît qu'avec une date d'achat (et ≥ 30 jours de détention).
+          </p>
+        </div>
+      )}
+
+      {/* Diversification par pays */}
+      {parPays.length > 0 && parPays.some((p) => p.pays !== 'Non renseigné') && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <h3>Diversification par pays</h3>
+          <div className="allocbar" style={{ marginTop: 4 }}>
+            {parPays.map((p, i) => (
+              <span key={p.pays} title={`${p.pays} · ${eur(p.valeur)}`}
+                style={{ width: `${(p.valeur / totalPays) * 100}%`,
+                         background: PAYS_COLORS[i % PAYS_COLORS.length] }} />
+            ))}
+          </div>
+          <div className="alloc-legend">
+            {parPays.map((p, i) => (
+              <div className="item" key={p.pays}>
+                <span className="swatch"
+                  style={{ background: PAYS_COLORS[i % PAYS_COLORS.length] }} />
+                <span>{p.pays}</span>
+                <span className="val">{eur(p.valeur)}</span>
+                <span className="pct">{Math.round((p.valeur / totalPays) * 100)}%</span>
+              </div>
+            ))}
+          </div>
+          <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
+            Hors comptes courants. Renseigne le pays de chaque actif
+            (formulaire → « Suivi de croissance & pays »).
+          </p>
+        </div>
+      )}
 
       {/* Connexion Binance (lecture seule) */}
       <div className="card" style={{ marginTop: 18 }}>

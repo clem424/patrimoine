@@ -9,6 +9,7 @@ membre de la famille ne voit que ses propres données. Seules les routes
 /api/auth/* (connexion, création de profil) sont publiques.
 """
 from __future__ import annotations
+import calendar
 import csv
 import io
 import re
@@ -354,6 +355,47 @@ def toggle_mask(asset_id: int, user: dict = User):
     return {"masque": db.toggle_asset_mask(user["id"], asset_id)}
 
 
+# ------------------------------------------- ROUTINES D'INVESTISSEMENT ---- #
+# Achat récurrent (type DCA) : chaque mois au jour choisi, la quantité de
+# l'actif augmente et son prix d'achat cumulé aussi (au cours du jour).
+# L'exécution est paresseuse : les échéances dues sont appliquées au premier
+# chargement des actifs qui suit (voir _apply_routines).
+class Routine(BaseModel):
+    asset_id: int
+    montant: float                  # euros investis à chaque échéance
+    jour: int                       # jour du mois (1-31)
+
+
+@app.get("/api/routines")
+def routines_get(user: dict = User):
+    return db.routine_list(user["id"])
+
+
+@app.post("/api/routines")
+def routine_create(body: Routine, user: dict = User):
+    uid = user["id"]
+    if body.montant <= 0:
+        raise HTTPException(400, "Montant invalide")
+    if not 1 <= body.jour <= 31:
+        raise HTTPException(400, "Jour du mois invalide (1-31)")
+    asset = next((a for a in db.list_assets(uid) if a["id"] == body.asset_id), None)
+    if not asset:
+        raise HTTPException(404, "Actif inconnu")
+    if not asset["ticker"]:
+        raise HTTPException(400, "Routine possible uniquement sur un actif coté (ticker)")
+    # Première échéance : aujourd'hui si le jour correspond, sinon la prochaine.
+    prochain = _next_after(dt.date.today() - dt.timedelta(days=1), body.jour)
+    rid = db.routine_add(uid, body.asset_id, body.montant, body.jour,
+                         prochain.isoformat())
+    return {"id": rid, "prochain": prochain.isoformat()}
+
+
+@app.delete("/api/routines/{rid}")
+def routine_remove(rid: int, user: dict = User):
+    db.routine_delete(user["id"], rid)
+    return {"ok": True}
+
+
 # ------------------------------------------------------- TYPES D'ACTIFS ---- #
 # Types intégrés + types personnalisés (créés depuis l'interface).
 _TYPE_PALETTE = ["#9B6BD0", "#C25E8A", "#4E9BB0", "#7E8F4C", "#B0764E", "#5876A8"]
@@ -513,24 +555,73 @@ def binance_sync(user: dict = User):
     return {"importes": len(avoirs), "avoirs": avoirs}
 
 
-def _assets_with_live_prices(uid: int):
-    """Liste des actifs, valeurs crypto (CoinGecko) et titres PEA (Yahoo) rafraîchies."""
-    assets = db.list_assets(uid)
+def _asset_quotes(assets: list[dict]) -> dict[str, dict]:
+    """{ticker: {prix, var_pct}} pour les actifs cotés (crypto + titres)."""
     crypto_ids = [a["ticker"] for a in assets if a["type"] == "crypto" and a["ticker"]]
     stock_syms = [a["ticker"] for a in assets if a["type"] == "pea" and a["ticker"]]
-    cprices = crypto.get_prices_eur(crypto_ids) if crypto_ids else {}
-    sprices = stocks.get_prices_eur(stock_syms) if stock_syms else {}
+    quotes = {}
+    if crypto_ids:
+        quotes.update(crypto.get_quotes_eur(crypto_ids))
+    if stock_syms:
+        quotes.update(stocks.get_quotes_eur(stock_syms))
+    return quotes
+
+
+def _clamp_day(year: int, month: int, day: int) -> dt.date:
+    return dt.date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def _next_after(d: dt.date, jour: int) -> dt.date:
+    """Prochaine échéance strictement après d, au jour demandé du mois
+    (borné au dernier jour des mois plus courts)."""
+    cand = _clamp_day(d.year, d.month, jour)
+    if cand <= d:
+        y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+        cand = _clamp_day(y, m, jour)
+    return cand
+
+
+def _apply_routines(uid: int):
+    """Exécute les échéances passées des routines d'investissement : la quantité
+    et le prix d'achat de l'actif augmentent au cours du jour. Si le cours est
+    indisponible (API en panne), l'échéance reste due et sera retentée."""
+    today = dt.date.today()
+    due = [r for r in db.routine_list(uid)
+           if r["ticker"] and dt.date.fromisoformat(r["prochain"]) <= today]
+    if not due:
+        return
+    quotes = _asset_quotes([{"type": r["asset_type"], "ticker": r["ticker"]} for r in due])
+    for r in due:
+        q = quotes.get(r["ticker"])
+        if not q or not q["prix"]:
+            continue
+        n = 0                                      # rattrape les échéances manquées
+        proch = dt.date.fromisoformat(r["prochain"])
+        while proch <= today:
+            n += 1
+            proch = _next_after(proch, r["jour"])
+        # Montant € fixe : la quantité de parts achetées découle du cours du jour.
+        cout = n * r["montant"]
+        db.asset_buy(uid, r["asset_id"], round(cout / q["prix"], 8), round(cout, 2))
+        db.routine_advance(uid, r["id"], proch.isoformat())
+
+
+def _assets_with_live_prices(uid: int):
+    """Liste des actifs, valeurs crypto (CoinGecko) et titres PEA (Yahoo) rafraîchies.
+    Applique d'abord les routines d'investissement arrivées à échéance."""
+    _apply_routines(uid)
+    assets = db.list_assets(uid)
+    quotes = _asset_quotes(assets)
     croissance_classes = db.class_growth_list(uid)
     out = []
     for a in assets:
         a = dict(a)
         a["croissance_classe"] = croissance_classes.get(a["type"])
-        if a["type"] == "crypto" and a.get("ticker") in cprices and a.get("quantite"):
-            a["cours"] = cprices[a["ticker"]]
+        q = quotes.get(a["ticker"]) if a.get("ticker") else None
+        if q and a.get("quantite") and a["type"] in ("crypto", "pea"):
+            a["cours"] = q["prix"]
             a["valeur"] = round(a["cours"] * a["quantite"], 2)
-        elif a["type"] == "pea" and a.get("ticker") in sprices and a.get("quantite"):
-            a["cours"] = sprices[a["ticker"]]
-            a["valeur"] = round(a["cours"] * a["quantite"], 2)
+            a["var_jour_pct"] = q["var_pct"]
         # Suivi de croissance : plus-value et %/an réel depuis le prix d'achat.
         if a.get("prix_achat"):
             val = a.get("valeur") or 0

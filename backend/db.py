@@ -154,7 +154,21 @@ def init_db():
             inclus   INTEGER NOT NULL,             -- 1 = ajout manuel, 0 = exclu
             PRIMARY KEY (user_id, event_id, op_id)
         );
+
+        CREATE TABLE IF NOT EXISTS invest_routines ( -- achats récurrents (DCA)
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            asset_id   INTEGER NOT NULL,           -- actif à ticker (PEA, crypto)
+            montant    REAL NOT NULL,              -- euros investis à chaque échéance
+            jour       INTEGER NOT NULL,           -- jour du mois (1-31, borné au mois)
+            prochain   TEXT NOT NULL,              -- YYYY-MM-DD prochaine échéance
+            created_at TEXT NOT NULL
+        );
         """)
+        # Routine : montant € fixe (virement programmé) plutôt qu'une quantité fixe.
+        rcols = _cols(conn, "invest_routines")
+        if "quantite" in rcols and "montant" not in rcols:
+            conn.execute("ALTER TABLE invest_routines RENAME COLUMN quantite TO montant")
         _migrate_multiuser(conn)
         _migrate_op_ids_v2(conn)
         # Suivi des remboursements : dépense avancée pour quelqu'un (resto payé
@@ -628,6 +642,8 @@ def toggle_asset_mask(uid: int, asset_id: int) -> bool:
 def delete_asset(uid: int, asset_id: int):
     with get_db() as conn:
         conn.execute("DELETE FROM manual_assets WHERE id=? AND user_id=?", (asset_id, uid))
+        conn.execute("DELETE FROM invest_routines WHERE asset_id=? AND user_id=?",
+                     (asset_id, uid))
 
 
 def update_asset_value(uid: int, asset_id: int, valeur: float):
@@ -642,6 +658,52 @@ def delete_assets_by_source(uid: int, source: str):
     """Supprime tous les actifs d'une source (avant resynchronisation)."""
     with get_db() as conn:
         conn.execute("DELETE FROM manual_assets WHERE user_id=? AND source=?", (uid, source))
+
+
+# ----- routines d'investissement (achats récurrents type DCA) -----
+def routine_list(uid: int) -> list[dict]:
+    """Routines du profil, avec l'actif visé (nom, type, ticker)."""
+    with get_db() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT r.*, a.nom AS asset_nom, a.type AS asset_type, a.ticker
+               FROM invest_routines r JOIN manual_assets a ON a.id = r.asset_id
+                    AND a.user_id = r.user_id
+               WHERE r.user_id=? ORDER BY r.prochain, r.id""", (uid,))]
+
+
+def routine_add(uid: int, asset_id: int, montant: float, jour: int, prochain: str) -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO invest_routines (user_id, asset_id, montant, jour,
+                                            prochain, created_at) VALUES (?,?,?,?,?,?)""",
+            (uid, asset_id, montant, jour, prochain, dt.datetime.now().isoformat()))
+        return cur.lastrowid
+
+
+def routine_delete(uid: int, rid: int):
+    with get_db() as conn:
+        conn.execute("DELETE FROM invest_routines WHERE id=? AND user_id=?", (rid, uid))
+
+
+def routine_advance(uid: int, rid: int, prochain: str):
+    with get_db() as conn:
+        conn.execute("UPDATE invest_routines SET prochain=? WHERE id=? AND user_id=?",
+                     (prochain, rid, uid))
+
+
+def asset_buy(uid: int, asset_id: int, add_qty: float, add_cost: float):
+    """Applique un achat sur l'actif : la quantité et le prix d'achat cumulé
+    augmentent (le suivi de plus-value reste juste au fil des exécutions)."""
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE manual_assets
+               SET quantite   = COALESCE(quantite, 0) + ?,
+                   prix_achat = COALESCE(prix_achat, 0) + ?,
+                   date_achat = COALESCE(date_achat, ?),
+                   updated_at = ?
+               WHERE id=? AND user_id=?""",
+            (add_qty, add_cost, dt.date.today().isoformat(),
+             dt.datetime.now().isoformat(), asset_id, uid))
 
 
 # ----- types d'actifs personnalisés -----

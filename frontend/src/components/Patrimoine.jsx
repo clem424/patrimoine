@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { api, eur, eurAsset, classColor, applyTypeColors } from '../lib/api.js'
+import { api, eur, eurAsset, classColor, applyTypeColors, dateFr } from '../lib/api.js'
 import { useSort, arrow } from '../lib/useSort.js'
 import Pyramide from './Pyramide.jsx'
 import { Eye, EyeOff } from './icons.jsx'
@@ -37,6 +37,9 @@ export default function Patrimoine({ onChange }) {
   const [binanceOn, setBinanceOn] = useState(false)
   const [keys, setKeys] = useState({ api_key: '', api_secret: '' })
   const [newType, setNewType] = useState(null)   // null = fermé, sinon texte saisi
+  // Routines d'investissement (achats récurrents sur un actif coté)
+  const [routines, setRoutines] = useState([])
+  const [rForm, setRForm] = useState({ asset_id: '', montant: '', jour: '' })
   // même réglage que le total du tableau de bord (localStorage partagé)
   const [maskTotal, setMaskTotal] = useState(localStorage.getItem('mask_total') === '1')
   const toggleTotal = () => {
@@ -60,11 +63,25 @@ export default function Patrimoine({ onChange }) {
 
   const load = () => api.assets().then(setAssets)
   const loadTypes = () => api.assetTypes().then((ts) => { setTypes(ts); applyTypeColors(ts) })
+  const loadRoutines = () => api.routines().then(setRoutines).catch(() => {})
   useEffect(() => {
-    load(); loadTypes()
+    load(); loadTypes(); loadRoutines()
     api.croissanceClasses().then(setGrowth).catch(() => {})
     api.binanceStatus().then((s) => setBinanceOn(s.configured)).catch(() => {})
   }, [])
+
+  const addRoutine = async () => {
+    if (!rForm.asset_id || !(parseFloat(rForm.montant) > 0)) return
+    try {
+      await api.routineAdd(parseInt(rForm.asset_id, 10), parseFloat(rForm.montant),
+        Math.min(31, Math.max(1, parseInt(rForm.jour, 10) || 1)))
+      setRForm({ asset_id: '', montant: '', jour: '' })
+      await loadRoutines(); await load()   // une échéance du jour s'applique aussitôt
+    } catch (e) { setMsg(`Routine non créée : ${e.message}`) }
+  }
+  const removeRoutine = async (id) => {
+    await api.routineDelete(id); await loadRoutines()
+  }
 
   const total = (assets || []).reduce((s, a) => s + (a.valeur || 0), 0)
 
@@ -224,6 +241,13 @@ export default function Patrimoine({ onChange }) {
                           {a.nom}
                           {a.quantite ? <span className="muted">
                             {' '}· {a.ticker ? `${a.quantite} u.` : `× ${a.quantite}`}</span> : null}
+                          {a.var_jour_pct != null ? (
+                            <span className={a.var_jour_pct >= 0 ? 'pos' : 'neg'}
+                              style={{ marginLeft: 6, fontSize: 12, fontFamily: 'var(--mono)' }}
+                              title="Variation du jour">
+                              {pct(a.var_jour_pct)} auj.
+                            </span>
+                          ) : null}
                           {a.source && a.source !== 'manuel'
                             ? <span className="src-tag" style={{ marginLeft: 6 }}>{a.source}</span> : null}
                           {a.prix_achat && !a.masque ? (
@@ -283,13 +307,22 @@ export default function Patrimoine({ onChange }) {
 
             <label>
               <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
-                {market === 'crypto' ? 'Crypto (recherche CoinGecko)'
+                {useTicker ? 'Nom affiché (alias)'
+                  : market === 'crypto' ? 'Crypto (recherche CoinGecko)'
                   : market === 'stock' ? 'Titre / ETF (recherche Yahoo)' : 'Nom'}</div>
               <input value={form.nom} style={{ width: '100%' }}
                 placeholder={market === 'crypto' ? 'bitcoin, ethereum…'
                   : market === 'stock' ? 'Air Liquide, MSCI World…' : 'ex : Livret A'}
-                onChange={(e) => market ? searchMarket(e.target.value)
+                onChange={(e) => market && !form.ticker ? searchMarket(e.target.value)
                   : setForm({ ...form, nom: e.target.value })} />
+              {useTicker && (
+                <p className="muted" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
+                  Titre suivi : <b>{form.ticker}</b> ·{' '}
+                  <a style={{ cursor: 'pointer', textDecoration: 'underline' }}
+                    onClick={() => { setForm({ ...form, ticker: '' }); setResults([]) }}>
+                    changer de titre</a>
+                </p>
+              )}
               {results.length > 0 && (
                 <div className="card" style={{ padding: 6, marginTop: 4 }}>
                   {results.map((r) => (
@@ -402,6 +435,63 @@ export default function Patrimoine({ onChange }) {
           </div>
         </div>
       </div>
+
+      {/* Routines d'investissement : achats récurrents sur les actifs cotés */}
+      {(routines.length > 0 || assets.some((a) => a.ticker)) && (
+        <div className="card" style={{ marginTop: 18 }}>
+          <h3>Routines d'investissement</h3>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+            À chaque échéance, ce montant est investi au cours du jour : la quantité
+            de parts et le prix d'achat de l'actif augmentent.
+          </p>
+          {routines.length > 0 && (
+            <table style={{ marginBottom: 10 }}>
+              <thead><tr>
+                <th>Actif</th>
+                <th style={{ textAlign: 'right' }}>Montant / mois</th>
+                <th style={{ textAlign: 'right' }}>Jour du mois</th>
+                <th>Prochaine échéance</th>
+                <th />
+              </tr></thead>
+              <tbody>
+                {routines.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.asset_nom} <span className="src-tag">{r.ticker}</span></td>
+                    <td className="num">{eur(r.montant)}</td>
+                    <td className="num">{r.jour}</td>
+                    <td>{dateFr(r.prochain)}</td>
+                    <td className="num" style={{ width: 1 }}>
+                      <button className="btn ghost" style={{ color: 'var(--clay)' }}
+                        onClick={() => removeRoutine(r.id)}>Suppr.</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <select value={rForm.asset_id} style={{ flex: 1, minWidth: 180 }}
+              onChange={(e) => setRForm({ ...rForm, asset_id: e.target.value })}>
+              <option value="">Actif coté…</option>
+              {assets.filter((a) => a.ticker).map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.nom} ({typeLabel[a.type] || a.type})
+                  {a.commentaire ? ` — ${a.commentaire}` : ''}</option>
+              ))}
+            </select>
+            <input type="number" step="any" min="0" placeholder="Montant €"
+              value={rForm.montant} style={{ width: 110 }}
+              onChange={(e) => setRForm({ ...rForm, montant: e.target.value })} />
+            <label className="row" style={{ gap: 6 }}>
+              <span className="muted" style={{ fontSize: 12 }}>le</span>
+              <input type="number" min="1" max="31" placeholder="1"
+                value={rForm.jour} style={{ width: 64, textAlign: 'right' }}
+                onChange={(e) => setRForm({ ...rForm, jour: e.target.value })} />
+              <span className="muted" style={{ fontSize: 12 }}>du mois</span>
+            </label>
+            <button className="btn primary" onClick={addRoutine}>Ajouter</button>
+          </div>
+        </div>
+      )}
 
       {/* Croissance visée par classe : héritée par les actifs de la classe */}
       {assets.length > 0 && (

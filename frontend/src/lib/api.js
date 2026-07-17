@@ -64,6 +64,10 @@ export const api = {
 
   saveAsset:   (a) => q('/api/assets', POST(a)),
   deleteAsset: (id) => q(`/api/assets/${id}`, { method: 'DELETE' }),
+  routines:      () => q('/api/routines'),
+  routineAdd:    (asset_id, montant, jour) =>
+    q('/api/routines', POST({ asset_id, montant, jour })),
+  routineDelete: (id) => q(`/api/routines/${id}`, { method: 'DELETE' }),
   cryptoSearch:(s) => q(`/api/crypto/search?q=${encodeURIComponent(s)}`),
   stockSearch: (s) => q(`/api/stocks/search?q=${encodeURIComponent(s)}`),
   pricesRefresh:() => q('/api/prices/refresh', { method: 'POST' }),

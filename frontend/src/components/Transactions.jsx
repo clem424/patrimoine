@@ -178,10 +178,13 @@ export default function Transactions({ onChange }) {
   }), [tx, debut, fin, fSource, fCat, fSens, fConf, fDu, fLie, liens, fMods, modMap, q, tri])
 
   // Synthèse de la sélection courante : entrées / sorties / net, en montants
-  // NETS (virements liés effacés, dépenses liées réduites au prorata).
+  // NETS (virements liés effacés, dépenses liées réduites au prorata) et HORS
+  // virements internes (un transfert compte -> livret gonflerait les deux
+  // colonnes sans être ni un revenu ni une dépense).
   const totaux = useMemo(() => {
     let entrees = 0, sorties = 0
     for (const t of rows) {
+      if (t.categorie === 'Virements internes') continue
       const a = liens.net.get(t.op_id)
       if (a?.drop) continue
       const m = a ? a.montant : t.montant
@@ -218,12 +221,12 @@ export default function Transactions({ onChange }) {
   // Réexamen des non-confirmées avec l'apprentissage à jour (corrections + few-shot).
   const reCat = async () => {
     setBusy(true)
-    setMsg('Réexamen des opérations non confirmées avec tes corrections… (peut prendre plusieurs minutes)')
+    setMsg('Réexamen des opérations non confirmées… (peut prendre plusieurs minutes)')
     try {
       const r = await api.recategorize()
       setMsg(`${r.examinees} réexaminées · ${r.modifiees} modifiée${r.modifiees > 1 ? 's' : ''}`
         + ` · ${r.inchangees} inchangées`
-        + (r.reste ? ` · ${r.reste} restantes — relance pour continuer` : ''))
+        + (r.reste ? ` · ${r.reste} restantes — relancer pour continuer` : ''))
       if (r.modifications?.length) {
         localStorage.setItem('recat_mods',
           JSON.stringify({ ts: Date.now(), mods: r.modifications }))
@@ -232,7 +235,7 @@ export default function Transactions({ onChange }) {
       }
       await load()
     } catch {
-      setMsg('Ollama injoignable. Vérifie qu\'il tourne sur le Pi.')
+      setMsg('Ollama injoignable.')
     } finally { setBusy(false) }
   }
 
@@ -244,7 +247,7 @@ export default function Transactions({ onChange }) {
       setMsg(`${r.traitees} traitées · ${det.rule || 0} par règles · ${det.ollama || 0} par Ollama · ${det.none || 0} restantes`)
       await load()
     } catch {
-      setMsg('Ollama injoignable. Vérifie qu\'il tourne (ollama serve) sur le Pi.')
+      setMsg('Ollama injoignable.')
     } finally { setBusy(false) }
   }
 
@@ -263,7 +266,7 @@ export default function Transactions({ onChange }) {
             onClick={() => api.exportCsv().catch((e) => setMsg(e.message))}>
             <Download /> Exporter</button>
           <button className="btn" onClick={reCat} disabled={busy}
-            title="Réexamine les opérations non confirmées (✓) en s'appuyant sur tes corrections — ce que tu as validé n'est jamais touché">
+            title="Réexamine les opérations non confirmées — les catégories validées (✓) ne sont jamais touchées">
             {busy ? '…' : 'Recatégoriser (non confirmées)'}
           </button>
           <button className="btn primary" onClick={autoCat} disabled={busy}>
@@ -307,9 +310,8 @@ export default function Transactions({ onChange }) {
                   <b className="pos">+{eur(panierInfo.recu)}</b> → les stats compteront{' '}
                   <b>{panierInfo.net >= 0 ? '−' : '+'}{eur(Math.abs(panierInfo.net))}</b>,
                   réparti sur les dépenses au prorata.</>
-              : <>Ajoute encore {panierInfo.paye <= 0 ? 'une dépense' : 'un virement reçu'}
-                  {' '}avec l'icône 🔗 (utilise la recherche et les filtres — toutes
-                  les périodes sont acceptées).</>}
+              : <>Il manque {panierInfo.paye <= 0 ? 'une dépense' : 'un virement reçu'}
+                  {' '}— à ajouter avec l'icône 🔗 (toutes périodes).</>}
           </p>
         </div>
       )}
@@ -319,8 +321,7 @@ export default function Transactions({ onChange }) {
         <div className="banner warn" style={{ marginBottom: 16, display: 'flex',
           alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span>Dernier réexamen : <b>{mods.length} catégorie{mods.length > 1 ? 's' : ''}
-            {' '}modifiée{mods.length > 1 ? 's' : ''}</b> — l'ancienne catégorie est
-            affichée sous chaque opération concernée.</span>
+            {' '}modifiée{mods.length > 1 ? 's' : ''}</b>.</span>
           <span className="row" style={{ gap: 8, marginLeft: 'auto' }}>
             <button className={'btn' + (fMods ? ' primary' : '')}
               onClick={() => {
@@ -353,7 +354,8 @@ export default function Transactions({ onChange }) {
           )}
           {/* Synthèse de la sélection */}
           <span className="muted" style={{ fontSize: 12.5, marginLeft: 'auto',
-            fontFamily: 'var(--mono)' }}>
+            fontFamily: 'var(--mono)' }}
+            title="Hors virements internes ; remboursements liés comptés en net">
             <span className="pos">+{eur(totaux.entrees)}</span>
             {' · '}<span className="neg">−{eur(totaux.sorties)}</span>
             {' · net '}<b className={totaux.net >= 0 ? 'pos' : 'neg'}>
@@ -434,7 +436,7 @@ export default function Transactions({ onChange }) {
                 onClick={() => setTri((t) => ({ key: 'montant', dir: t.key === 'montant' ? -t.dir : -1 }))}>
                 Montant{tri.key === 'montant' ? (tri.dir === -1 ? ' ▼' : ' ▲') : ''}</th>
               <th title="Catégorie vérifiée ?" style={{ textAlign: 'center' }}>✓</th>
-              <th title="Dépense : à te faire rembourser ? · Virement reçu : lier à la dépense qu'il rembourse"
+              <th title="Suivi des remboursements : marquer « à rembourser » ou lier dépense ↔ virement reçu"
                 style={{ textAlign: 'center' }}>Dû</th></tr>
           </thead>
           <tbody>
@@ -463,7 +465,8 @@ export default function Transactions({ onChange }) {
                       {catsTriees.map((c) => <option key={c}>{c}</option>)}
                     </select>
                     {modMap.has(t.op_id) && (
-                      <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+                      <div className="muted cell-sub"
+                        title={`Avant le réexamen : ${modMap.get(t.op_id).avant}`}>
                         avant : {modMap.get(t.op_id).avant}</div>
                     )}
                   </td>
@@ -478,15 +481,17 @@ export default function Transactions({ onChange }) {
                       // virement partiellement utilisé : il en reste en revenu
                       if (a?.reste) return <>
                         <span className="pos">+{eur(a.montant)}</span>
-                        <div className="muted" style={{ fontSize: 11 }}>
-                          sur +{eur(t.montant)} reçus (le reste rembourse le groupe)</div>
+                        <div className="muted cell-sub"
+                          title={`Reçu +${eur(t.montant)} ; le reste rembourse le groupe`}>
+                          sur +{eur(t.montant)} reçus</div>
                       </>
                       // dépense remboursée : le paiement « passe » au net (50 → 25)
                       if (a) return <>
                         <span className={a.montant >= 0 ? 'pos' : 'neg'}>
                           {a.montant >= 0 ? '+' : '−'}{eur(Math.abs(a.montant))}</span>
-                        <div className="muted" style={{ fontSize: 11 }}>
-                          payé −{eur(Math.abs(t.montant))}, remboursé +{eur(a.rembourse)}</div>
+                        <div className="muted cell-sub"
+                          title={`Payé −${eur(Math.abs(t.montant))}, remboursé +${eur(a.rembourse)}`}>
+                          payé −{eur(Math.abs(t.montant))}</div>
                       </>
                       return (
                         <span className={t.montant >= 0 ? 'pos' : 'neg'}>
@@ -496,7 +501,7 @@ export default function Transactions({ onChange }) {
                   <td style={{ textAlign: 'center', width: 34 }}>
                     <button className={'confirm-btn' + (e === 'ok' ? ' on' : '')}
                       disabled={e === 'vide'} onClick={() => confirm(t)}
-                      title={e === 'vide' ? 'Catégorise d\'abord cette opération'
+                      title={e === 'vide' ? 'Opération non catégorisée'
                         : e === 'ok' ? 'Catégorie confirmée — cliquer pour repasser « à vérifier »'
                         : 'Confirmer cette catégorie'}>
                       <Check size={16} />
@@ -508,7 +513,7 @@ export default function Transactions({ onChange }) {
                         onClick={() => toggleDue(t)}
                         title={t.a_rembourser
                           ? 'Remboursé — cliquer pour retirer le suivi'
-                          : 'Marquer « à rembourser » (on te doit cette dépense)'}>
+                          : 'Marquer « à rembourser » (dépense à se faire rembourser)'}>
                         <Refund size={15} />
                       </button>
                     )}
@@ -533,7 +538,7 @@ export default function Transactions({ onChange }) {
             Aucune opération sur cette période avec ces filtres.</p>}
         {rows.length > 400 &&
           <p className="muted" style={{ marginTop: 12 }}>
-            400 premières affichées — affine avec les filtres.</p>}
+            400 premières affichées.</p>}
       </div>
     </>
   )

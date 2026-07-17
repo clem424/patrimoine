@@ -38,8 +38,8 @@ export default function Login({ onLogin }) {
         </div>
         <p className="muted" style={{ margin: '2px 0 18px', fontSize: 13 }}>
           {mode === 'login'
-            ? 'Connecte-toi à ton profil : chacun ne voit que ses propres comptes.'
-            : 'Crée ton profil : tes comptes, opérations et actifs seront privés.'}
+            ? 'Chaque profil ne voit que ses propres comptes.'
+            : 'Nouveau profil : comptes, opérations et actifs privés.'}
         </p>
 
         <form onSubmit={submit} className="login-form">
@@ -49,7 +49,7 @@ export default function Login({ onLogin }) {
             autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
             onChange={(e) => setPassword(e.target.value)} />
           {mode === 'register' &&
-            <input type="password" placeholder="Confirme le mot de passe" value={confirm}
+            <input type="password" placeholder="Confirmation du mot de passe" value={confirm}
               autoComplete="new-password" onChange={(e) => setConfirm(e.target.value)} />}
           {err && <div className="banner warn">{err}</div>}
           <button className="btn primary" disabled={busy || !pseudo || !password}>
@@ -62,7 +62,7 @@ export default function Login({ onLogin }) {
           {mode === 'login' ? 'Première visite ? Créer un profil' : 'J\'ai déjà un profil — me connecter'}
         </button>
       </div>
-      <div className="login-foot">self-hosted · raspberry pi · tes données restent sur ta machine</div>
+      <div className="login-foot">self-hosted · raspberry pi · données 100 % locales</div>
     </div>
   )
 }

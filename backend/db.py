@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import secrets
 import sqlite3
+import unicodedata
 import datetime as dt
 from pathlib import Path
 from contextlib import contextmanager
@@ -136,6 +137,22 @@ def init_db():
             date    TEXT NOT NULL,                 -- YYYY-MM-DD (1 point par jour)
             total   REAL NOT NULL,
             PRIMARY KEY (user_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS events (        -- évènements (vacances, fêtes…)
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            nom        TEXT NOT NULL,
+            debut      TEXT NOT NULL,              -- YYYY-MM-DD inclus
+            fin        TEXT NOT NULL,              -- YYYY-MM-DD inclus
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS event_overrides (
+            user_id  INTEGER NOT NULL,
+            event_id INTEGER NOT NULL,
+            op_id    TEXT NOT NULL,
+            inclus   INTEGER NOT NULL,             -- 1 = ajout manuel, 0 = exclu
+            PRIMARY KEY (user_id, event_id, op_id)
         );
         """)
         _migrate_multiuser(conn)
@@ -496,11 +513,19 @@ def cache_examples(uid: int, limit: int = 12) -> list[tuple[str, str]]:
 
 
 # ----- catégories du profil (intégrées + personnalisées, renommables) -----
+def _alpha(nom: str) -> str:
+    """Clé de tri alphabétique insensible aux accents et à la casse
+    (« Épargne » se range avec les E, pas après le Z)."""
+    return unicodedata.normalize("NFD", nom).encode("ascii", "ignore").decode().casefold()
+
+
 def list_categories(uid: int) -> list[dict]:
+    """Catégories du profil, par ordre alphabétique (selects, listes, Ollama)."""
     with get_db() as conn:
-        return [dict(r) for r in conn.execute(
+        rows = [dict(r) for r in conn.execute(
             "SELECT nom, description, builtin, position FROM user_categories"
-            " WHERE user_id=? ORDER BY position, nom", (uid,))]
+            " WHERE user_id=?", (uid,))]
+    return sorted(rows, key=lambda c: _alpha(c["nom"]))
 
 
 def category_names(uid: int) -> list[str]:
@@ -677,6 +702,61 @@ def budget_set(uid: int, categorie: str, montant: float):
                          " VALUES (?,?,?)", (uid, categorie, montant))
         else:
             conn.execute("DELETE FROM budgets WHERE user_id=? AND categorie=?", (uid, categorie))
+
+
+# ----- évènements (vacances, fêtes… : dépenses d'une période) -----
+def event_list(uid: int) -> list[dict]:
+    with get_db() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM events WHERE user_id=? ORDER BY debut DESC", (uid,))]
+
+
+def event_get(uid: int, eid: int) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM events WHERE id=? AND user_id=?",
+                           (eid, uid)).fetchone()
+        return dict(row) if row else None
+
+
+def event_create(uid: int, nom: str, debut: str, fin: str) -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO events (user_id, nom, debut, fin, created_at) VALUES (?,?,?,?,?)",
+            (uid, nom, debut, fin, dt.datetime.now().isoformat()))
+        return cur.lastrowid
+
+
+def event_update(uid: int, eid: int, nom: str, debut: str, fin: str):
+    with get_db() as conn:
+        conn.execute("UPDATE events SET nom=?, debut=?, fin=? WHERE id=? AND user_id=?",
+                     (nom, debut, fin, eid, uid))
+
+
+def event_delete(uid: int, eid: int):
+    with get_db() as conn:
+        conn.execute("DELETE FROM events WHERE id=? AND user_id=?", (eid, uid))
+        conn.execute("DELETE FROM event_overrides WHERE event_id=? AND user_id=?",
+                     (eid, uid))
+
+
+def event_overrides(uid: int, eid: int) -> dict[str, int]:
+    """{op_id: 1 (ajout manuel) | 0 (exclu)} pour un évènement."""
+    with get_db() as conn:
+        return {r["op_id"]: r["inclus"] for r in conn.execute(
+            "SELECT op_id, inclus FROM event_overrides WHERE user_id=? AND event_id=?",
+            (uid, eid))}
+
+
+def event_override_set(uid: int, eid: int, op_id: str, inclus: int | None):
+    """inclus=1 force l'ajout, 0 exclut, None revient à l'automatique (période)."""
+    with get_db() as conn:
+        if inclus is None:
+            conn.execute("DELETE FROM event_overrides WHERE user_id=? AND event_id=?"
+                         " AND op_id=?", (uid, eid, op_id))
+        else:
+            conn.execute("INSERT OR REPLACE INTO event_overrides"
+                         " (user_id, event_id, op_id, inclus) VALUES (?,?,?,?)",
+                         (uid, eid, op_id, inclus))
 
 
 # ----- croissance visée par classe d'actif (%/an, par profil) -----

@@ -63,6 +63,45 @@ def apply_links(tx):
     return out
 
 
+def event_report(tx, event, overrides):
+    """Bilan d'un évènement : par défaut, toutes les opérations NETTES (passer
+    tx par apply_links) de la période [debut, fin] — dépenses ET argent reçu
+    (un cadeau reçu pendant les vacances vient en déduction du coût) — hors
+    catégories NON_DEPENSES (salaire, épargne, virements internes : un salaire
+    versé pendant les vacances ne les « rembourse » pas). Overrides : 0 =
+    exclue (« rien à voir »), 1 = ajoutée manuellement (même hors période,
+    même en catégorie Revenus). Les exclues restent listées (statut 'exclu')
+    pour pouvoir les réintégrer. total = dépensé − reçu."""
+    ops, agg = [], defaultdict(float)
+    depense = recu = 0.0
+    for t in tx:
+        jour = t["date"][:10]
+        auto = (event["debut"] <= jour <= event["fin"]
+                and t["categorie"] not in NON_DEPENSES)
+        ov = overrides.get(t["op_id"])
+        if ov == 1:
+            statut = "inclus"
+        elif ov == 0 and auto:
+            statut = "exclu"
+        elif ov is None and auto:
+            statut = "auto"
+        else:
+            continue
+        ops.append({**t, "statut": statut})
+        if statut != "exclu":
+            if t["montant"] < 0:
+                depense += -t["montant"]
+            else:
+                recu += t["montant"]
+            agg[t["categorie"]] += -t["montant"]
+    ops.sort(key=lambda t: t["date"], reverse=True)
+    return {"ops": ops, "total": round(depense - recu, 2),
+            "depense": round(depense, 2), "recu": round(recu, 2),
+            "nb": sum(1 for o in ops if o["statut"] != "exclu"),
+            "par_categorie": [{"categorie": c, "montant": round(v, 2)}
+                              for c, v in sorted(agg.items(), key=lambda x: -x[1])]}
+
+
 def merchant_key(libelle: str) -> str:
     """Regroupe les libellés d'un même marchand (dates/numéros de ticket ignorés)."""
     s = re.sub(r"\d+", "", libelle.lower())

@@ -12,6 +12,7 @@ const Dashboard    = lazy(() => import('./components/Dashboard.jsx'))
 const Transactions = lazy(() => import('./components/Transactions.jsx'))
 const Patrimoine   = lazy(() => import('./components/Patrimoine.jsx'))
 const Budget       = lazy(() => import('./components/Budget.jsx'))
+const Evenements   = lazy(() => import('./components/Evenements.jsx'))
 const Import       = lazy(() => import('./components/Import.jsx'))
 const Settings     = lazy(() => import('./components/Settings.jsx'))
 
@@ -20,6 +21,7 @@ const PAGES = [
   { id: 'patrimoine', label: 'Patrimoine', ic: '▲', comp: Patrimoine },
   { id: 'budget', label: 'Budget', ic: '◎', comp: Budget },
   { id: 'transactions', label: 'Opérations', ic: '≡', comp: Transactions },
+  { id: 'evenements', label: 'Évènements', ic: '⚑', comp: Evenements },
   { id: 'import', label: 'Importer', ic: '↥', comp: Import },
   { id: 'reglages', label: 'Réglages', ic: '⚙', comp: Settings },
 ]
@@ -27,6 +29,7 @@ const PAGES = [
 export default function App() {
   const [user, setUser] = useState(undefined)      // undefined = vérification en cours
   const [page, setPage] = useState('dashboard')
+  const [navOpen, setNavOpen] = useState(false)    // tiroir de navigation (mobile)
   const [refresh, setRefresh] = useState(0)        // bump pour forcer un rechargement
   const [hidden, setHiddenState] = useState(isHidden())
   const [theme, setTheme] = useState(getTheme())
@@ -72,7 +75,13 @@ export default function App() {
 
   return (
     <div className="app">
-      <aside className="sidebar">
+      {/* Mobile : bouton ☰ + fond assombri ; le tiroir se ferme au choix d'une
+          page, au clic sur le fond, ou au ✕. */}
+      <button className="nav-burger" onClick={() => setNavOpen((v) => !v)}
+        title={navOpen ? 'Fermer le menu' : 'Ouvrir le menu'}
+        aria-label="Menu">{navOpen ? '✕' : '☰'}</button>
+      {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} />}
+      <aside className={'sidebar' + (navOpen ? ' open' : '')}>
         <div className="brand">
           <span className="dot" />
           <span className="txt">Patrimoine</span>
@@ -81,7 +90,7 @@ export default function App() {
         <nav className="nav">
           {PAGES.map((p) => (
             <button key={p.id} className={page === p.id ? 'active' : ''}
-                    onClick={() => setPage(p.id)}>
+                    onClick={() => { setPage(p.id); setNavOpen(false) }}>
               <span className="ic">{p.ic}</span>
               <span className="lbl">{p.label}</span>
             </button>
@@ -102,7 +111,7 @@ export default function App() {
           <span className="lbl" title={`Connecté : ${user}`}>{user}</span>
           <button className="btn-logout" onClick={logout} title="Se déconnecter">⎋</button>
         </div>
-        <div className="foot">Tes données restent<br />sur ta machine.</div>
+        <div className="foot">Données 100 % locales.</div>
       </aside>
       <main className="main">
         <Suspense fallback={<div className="row" style={{ padding: 40 }}><span className="spinner" /></div>}>

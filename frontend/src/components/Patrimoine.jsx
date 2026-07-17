@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api, eur, eurAsset, classColor, applyTypeColors } from '../lib/api.js'
+import { useSort, arrow } from '../lib/useSort.js'
 import Pyramide from './Pyramide.jsx'
 import { Eye, EyeOff } from './icons.jsx'
 
@@ -45,6 +46,7 @@ export default function Patrimoine({ onChange }) {
 
   const typeLabel = Object.fromEntries(types.map((t) => [t.slug, t.label]))
 
+  const suiviTri = useSort('valeur')
   // Croissance visée par classe (héritée par les actifs sans croissance propre)
   const [growth, setGrowth] = useState({})
   const saveGrowth = async (slug, val) => {
@@ -67,7 +69,11 @@ export default function Patrimoine({ onChange }) {
   const total = (assets || []).reduce((s, a) => s + (a.valeur || 0), 0)
 
   // Suivi de croissance : actifs dont le prix d'achat est renseigné.
-  const suivis = (assets || []).filter((a) => a.prix_achat)
+  const suivis = suiviTri.sortRows((assets || []).filter((a) => a.prix_achat), {
+    nom: (a) => a.nom, investi: (a) => a.prix_achat, valeur: (a) => a.valeur,
+    pv: (a) => a.plus_value, reel: (a) => a.perf_annuelle,
+    vise: (a) => a.croissance_pct ?? a.croissance_classe ?? null,
+  })
   const investi = suivis.reduce((s, a) => s + a.prix_achat, 0)
   const valeurSuivie = suivis.reduce((s, a) => s + (a.valeur || 0), 0)
 
@@ -160,7 +166,7 @@ export default function Patrimoine({ onChange }) {
     try {
       const r = await api.binanceKeysSet(keys.api_key, keys.api_secret)
       setBinanceOn(r.configured); setKeys({ api_key: '', api_secret: '' })
-      setMsg('Clés Binance enregistrées. Tu peux synchroniser.')
+      setMsg('Clés Binance enregistrées.')
     } catch { setMsg('Échec de l\'enregistrement des clés.') }
   }
 
@@ -179,7 +185,7 @@ export default function Patrimoine({ onChange }) {
           <button className="btn" onClick={refreshPrices} disabled={busy}>
             {busy ? '…' : '↻ Rafraîchir les cours'}</button>
           <button className="btn" onClick={syncBinance} disabled={busy}
-            title={binanceOn ? '' : 'Renseigne les clés Binance (lecture seule) dans docker-compose.yml'}>
+            title={binanceOn ? '' : 'Clés Binance non configurées (carte en bas de page)'}>
             Synchroniser Binance{binanceOn ? '' : ' ⚠'}</button>
         </div>
       </div>
@@ -190,10 +196,6 @@ export default function Patrimoine({ onChange }) {
       <div className="card" style={{ marginBottom: 18 }}>
         <h3>La pyramide patrimoniale</h3>
         <Pyramide assets={assets} />
-        <p className="muted" style={{ fontSize: 12, textAlign: 'center', marginBottom: 0 }}>
-          Base solide d'abord : sécurité (comptes, livrets) → croissance (PEA, ETF)
-          → diversification (cryptos, collections) → optimisation.
-        </p>
       </div>
 
       <div className="grid cols-2">
@@ -201,7 +203,7 @@ export default function Patrimoine({ onChange }) {
         <div className="card">
           <h3>Mes actifs</h3>
           {assets.length === 0
-            ? <p className="muted">Aucun actif. Ajoute-en un avec le formulaire →</p>
+            ? <p className="muted">Aucun actif pour l'instant.</p>
             : groupAssets(assets).map((g) => (
               <details key={g.type} open={g.items.length <= 4}
                 style={{ marginBottom: 8, borderBottom: '1px solid var(--surface-2)' }}>
@@ -281,8 +283,8 @@ export default function Patrimoine({ onChange }) {
 
             <label>
               <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
-                {market === 'crypto' ? 'Crypto (cherche puis sélectionne)'
-                  : market === 'stock' ? 'Titre / ETF (cherche puis sélectionne)' : 'Nom'}</div>
+                {market === 'crypto' ? 'Crypto (recherche CoinGecko)'
+                  : market === 'stock' ? 'Titre / ETF (recherche Yahoo)' : 'Nom'}</div>
               <input value={form.nom} style={{ width: '100%' }}
                 placeholder={market === 'crypto' ? 'bitcoin, ethereum…'
                   : market === 'stock' ? 'Air Liquide, MSCI World…' : 'ex : Livret A'}
@@ -312,7 +314,7 @@ export default function Patrimoine({ onChange }) {
                   style={{ width: '100%' }} placeholder={market === 'crypto' ? '0.0085' : '12'}
                   onChange={(e) => setForm({ ...form, quantite: e.target.value })} />
                 <p className="muted" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
-                  La valeur € est calculée au rafraîchissement des cours
+                  Valeur € calculée au rafraîchissement des cours
                   ({market === 'crypto' ? 'CoinGecko' : 'Yahoo Finance'}).</p>
               </label>
             ) : (
@@ -338,11 +340,6 @@ export default function Patrimoine({ onChange }) {
                     {eur(parseFloat(form.valeur) || 0)} = total&nbsp;
                     <b>{eur((parseFloat(form.quantite) || 1) * (parseFloat(form.valeur) || 0))}</b>
                   </p>
-                )}
-                {market === 'stock' && (
-                  <p className="muted" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
-                    Astuce : cherche un titre ci-dessus pour un suivi automatique, ou saisis
-                    une valeur fixe (ex : liquidités du PEA).</p>
                 )}
               </div>
             )}
@@ -393,9 +390,6 @@ export default function Patrimoine({ onChange }) {
                       onChange={(e) => setForm({ ...form, pays: e.target.value })} />
                   </label>
                 </div>
-                <p className="muted" style={{ fontSize: 11.5, margin: 0 }}>
-                  Le prix d'achat suit la plus-value, la croissance visée alimente le
-                  patrimoine projeté (tableau de bord), le pays la diversification.</p>
               </div>
             </details>
 
@@ -414,8 +408,7 @@ export default function Patrimoine({ onChange }) {
         <div className="card" style={{ marginTop: 18 }}>
           <h3>Croissance visée par classe d'actif</h3>
           <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
-            S'applique à tous les actifs de la classe dans le <b>patrimoine projeté</b>
-            {' '}(un actif avec sa propre croissance visée garde la sienne). Vide = 0 %.
+            Utilisée par le patrimoine projeté ; la croissance propre d'un actif prime.
           </p>
           <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
             {groupAssets(assets)
@@ -451,12 +444,21 @@ export default function Patrimoine({ onChange }) {
             </b>
           </p>
           <table>
-            <thead><tr><th>Actif</th>
-              <th style={{ textAlign: 'right' }}>Investi</th>
-              <th style={{ textAlign: 'right' }}>Valeur</th>
-              <th style={{ textAlign: 'right' }}>Plus-value</th>
-              <th style={{ textAlign: 'right' }} title="Croissance annualisée réelle depuis la date d'achat">Réel %/an</th>
-              <th style={{ textAlign: 'right' }} title="Croissance visée saisie sur l'actif">Visé %/an</th></tr></thead>
+            <thead><tr>
+              <th className="sortable" onClick={() => suiviTri.toggle('nom', 1)}>
+                Actif{arrow(suiviTri.tri, 'nom')}</th>
+              <th className="sortable" style={{ textAlign: 'right' }}
+                onClick={() => suiviTri.toggle('investi')}>Investi{arrow(suiviTri.tri, 'investi')}</th>
+              <th className="sortable" style={{ textAlign: 'right' }}
+                onClick={() => suiviTri.toggle('valeur')}>Valeur{arrow(suiviTri.tri, 'valeur')}</th>
+              <th className="sortable" style={{ textAlign: 'right' }}
+                onClick={() => suiviTri.toggle('pv')}>Plus-value{arrow(suiviTri.tri, 'pv')}</th>
+              <th className="sortable" style={{ textAlign: 'right' }}
+                title="Croissance annualisée réelle depuis la date d'achat"
+                onClick={() => suiviTri.toggle('reel')}>Réel %/an{arrow(suiviTri.tri, 'reel')}</th>
+              <th className="sortable" style={{ textAlign: 'right' }}
+                title="Croissance visée (actif, sinon classe)"
+                onClick={() => suiviTri.toggle('vise')}>Visé %/an{arrow(suiviTri.tri, 'vise')}</th></tr></thead>
             <tbody>
               {suivis.map((a) => (
                 <tr key={a.id}>
@@ -479,7 +481,7 @@ export default function Patrimoine({ onChange }) {
             </tbody>
           </table>
           <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-            « Réel %/an » n'apparaît qu'avec une date d'achat (et ≥ 30 jours de détention).
+            « Réel %/an » : nécessite une date d'achat et ≥ 30 jours de détention.
           </p>
         </div>
       )}
@@ -507,8 +509,7 @@ export default function Patrimoine({ onChange }) {
             ))}
           </div>
           <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-            Hors comptes courants. Renseigne le pays de chaque actif
-            (formulaire → « Suivi de croissance & pays »).
+            Hors comptes courants.
           </p>
         </div>
       )}
@@ -517,12 +518,12 @@ export default function Patrimoine({ onChange }) {
       <div className="card" style={{ marginTop: 18 }}>
         <h3>Connexion Binance (lecture seule)</h3>
         <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-          Crée sur Binance une clé API avec la <b>seule</b> permission « Read Info »
-          (aucun retrait, aucun trade). Elle est stockée localement sur ton Pi.
+          Clé API avec la <b>seule</b> permission « Read Info » (aucun retrait,
+          aucun trade), stockée localement.
         </p>
         {binanceOn && (
           <div className="banner" style={{ marginBottom: 12 }}>
-            ✓ Binance connecté — utilise « Synchroniser Binance » en haut de page.
+            ✓ Binance connecté.
           </div>)}
         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           <input type="password" placeholder="API Key" value={keys.api_key}

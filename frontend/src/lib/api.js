@@ -81,6 +81,7 @@ export const api = {
 
   objectifGet: () => q('/api/settings/objectif'),
   objectifSet: (montant) => q('/api/settings/objectif', POST({ montant })),
+  revenuSet:   (montant) => q('/api/settings/revenu', POST({ montant })),
   exportCsv: async () => {
     const r = await fetch('/api/export/transactions.csv',
       { headers: TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {} })
@@ -104,6 +105,15 @@ export const api = {
   projection:      (annees = 10, extra = 0, courants = false) =>
     q(`/api/projection?annees=${annees}&extra=${extra}&courants=${courants}`),
   patrimoinePays:  () => q('/api/patrimoine/pays'),
+  evenements:       () => q('/api/evenements'),
+  evenementDetail:  (id) => q(`/api/evenements/${id}`),
+  evenementCreate:  (nom, debut, fin) => q('/api/evenements', POST({ nom, debut, fin })),
+  evenementPatch:   (id, nom, debut, fin) =>
+    q(`/api/evenements/${id}`, PATCH({ nom, debut, fin })),
+  evenementDelete:  (id) => q(`/api/evenements/${id}`, { method: 'DELETE' }),
+  evenementOverride:(id, op_id, mode) =>
+    q(`/api/evenements/${id}/override`, POST({ op_id, mode })),
+
   croissanceClasses: () => q('/api/croissance-classes'),
   setCroissanceClasse: (slug, pct) => q('/api/croissance-classes',
     { method: 'PUT', body: JSON.stringify({ slug, pct }) }),

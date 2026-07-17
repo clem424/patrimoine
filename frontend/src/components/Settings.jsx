@@ -53,7 +53,7 @@ export default function Settings({ onChange }) {
     <>
       <div className="page-head">
         <h1>Réglages</h1>
-        <p>Catégories, types d'actifs, noms d'actifs et profil — modifie tout ici.</p>
+        <p>Catégories, types d'actifs, objectif et profil.</p>
       </div>
 
       {msg && <div className="banner" style={{ marginBottom: 16 }}>{msg}</div>}
@@ -61,9 +61,8 @@ export default function Settings({ onChange }) {
       <div className="card" style={{ marginBottom: 18 }}>
         <h3>Catégories d'opérations</h3>
         <p className="muted" style={{ fontSize: 13, marginTop: -8 }}>
-          Renommer une catégorie met à jour toutes tes opérations, budgets et
-          l'apprentissage. La <b>description</b> guide Ollama : plus elle est précise
-          (mots-clés, noms de marchands), mieux il classe.</p>
+          Renommer met à jour opérations, budgets et apprentissage. La
+          <b> description</b> guide Ollama (mots-clés, noms de marchands).</p>
         <table>
           <thead><tr><th>Nom</th><th>Description (guide Ollama)</th>
             <th style={{ textAlign: 'right' }}>Opérations</th><th /></tr></thead>
@@ -86,7 +85,7 @@ export default function Settings({ onChange }) {
                 <td style={{ textAlign: 'right' }}>
                   {!c.protected &&
                     <button className="btn ghost icon" style={{ color: 'var(--clay)' }}
-                      title={c.usage ? 'Encore utilisée — recatégorise d\'abord ses opérations' : 'Supprimer'}
+                      title={c.usage ? 'Encore utilisée par des opérations ou budgets' : 'Supprimer'}
                       onClick={() => act(() => api.deleteCategory(c.nom))}>×</button>}
                 </td>
               </tr>
@@ -141,8 +140,7 @@ export default function Settings({ onChange }) {
         <div className="card">
           <h3>Objectif de patrimoine</h3>
           <p className="muted" style={{ fontSize: 13, marginTop: -8 }}>
-            Fixe un cap (ex : 50 000 €) : la progression s'affiche sur le tableau
-            de bord. Laisse vide ou mets 0 pour le retirer.</p>
+            Progression affichée sur le tableau de bord. 0 ou vide pour le retirer.</p>
           <div className="row" style={{ gap: 8 }}>
             <input type="number" step="1000" min="0" placeholder="ex : 50000"
               value={objectif} style={{ flex: 1 }}
@@ -155,7 +153,7 @@ export default function Settings({ onChange }) {
         <div className="card">
           <h3>Mon profil</h3>
           <p className="muted" style={{ fontSize: 13, marginTop: -8 }}>
-            Changer ton mot de passe déconnecte toutes tes sessions.</p>
+            Changer le mot de passe déconnecte toutes les sessions du profil.</p>
           <div className="login-form">
             <input type="password" placeholder="Ancien mot de passe" value={pwd.ancien}
               autoComplete="current-password"
@@ -167,7 +165,7 @@ export default function Settings({ onChange }) {
               onClick={() => act(async () => {
                 await api.changePassword(pwd.ancien, pwd.nouveau)
                 setPwd({ ancien: '', nouveau: '' })
-              }, 'Mot de passe changé — reconnecte-toi à la prochaine visite.')}>
+              }, 'Mot de passe changé — reconnexion nécessaire à la prochaine visite.')}>
               Changer le mot de passe</button>
           </div>
         </div>

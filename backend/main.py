@@ -168,7 +168,7 @@ def lier_transactions(body: LierBody, user: dict = User):
     uid = user["id"]
     ids = list(dict.fromkeys(body.op_ids))
     if len(ids) < 2:
-        raise HTTPException(400, "Sélectionne au moins deux opérations")
+        raise HTTPException(400, "Au moins deux opérations sont nécessaires")
     txs = [db.get_transaction(uid, i) for i in ids]
     if any(t is None for t in txs):
         raise HTTPException(404, "Opération inconnue dans la sélection")
@@ -203,7 +203,7 @@ def confirm_category(op_id: str, body: ConfirmBody, user: dict = User):
     if not tx:
         raise HTTPException(404, "Opération inconnue")
     if tx["categorie"] == "Non catégorisé":
-        raise HTTPException(400, "Catégorise d'abord l'opération")
+        raise HTTPException(400, "Opération non catégorisée")
     db.update_category(uid, op_id, tx["categorie"], "manual" if body.confirme else "auto")
     if body.confirme:
         db.cache_set(uid, _cle(tx["libelle"]), tx["categorie"], origin="manual")
@@ -499,8 +499,8 @@ def binance_sync(user: dict = User):
     uid = user["id"]
     key, secret = _binance_creds(uid)
     if not (key and secret):
-        raise HTTPException(400, "Clés Binance absentes. Renseigne-les dans « Patrimoine »"
-                                 " (lecture seule).")
+        raise HTTPException(400, "Clés Binance absentes (à renseigner dans « Patrimoine »,"
+                                 " lecture seule).")
     try:
         avoirs = binance.sync(key, secret)
     except Exception as e:
@@ -581,7 +581,10 @@ def budget_get(mois: str | None = None, user: dict = User):
     uid = user["id"]
     mois = mois or dt.date.today().strftime("%Y-%m")
     tx = analytics.apply_links(db.fetch_transactions(uid))
-    return analytics.budget_status(tx, db.budget_list(uid), mois)
+    out = analytics.budget_status(tx, db.budget_list(uid), mois)
+    revenu = db.setting_get(f"revenu:{uid}")
+    out["revenu"] = float(revenu) if revenu else None
+    return out
 
 
 @app.put("/api/budget")
@@ -590,6 +593,96 @@ def budget_put(body: BudgetLine, user: dict = User):
     if body.categorie not in all_categories(uid):
         raise HTTPException(400, "Catégorie inconnue")
     db.budget_set(uid, body.categorie, body.montant)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------ ÉVÈNEMENTS ---- #
+class EventBody(BaseModel):
+    nom: str
+    debut: str          # YYYY-MM-DD inclus
+    fin: str            # YYYY-MM-DD inclus
+
+
+class EventOverride(BaseModel):
+    op_id: str
+    mode: str           # exclure | inclure | auto (retour à la période)
+
+
+def _event_dates(body: EventBody) -> tuple[str, str]:
+    try:
+        debut = dt.date.fromisoformat(body.debut.strip()).isoformat()
+        fin = dt.date.fromisoformat(body.fin.strip()).isoformat()
+    except ValueError:
+        raise HTTPException(400, "Dates attendues au format AAAA-MM-JJ")
+    if fin < debut:
+        raise HTTPException(400, "La fin est avant le début")
+    if not body.nom.strip():
+        raise HTTPException(400, "Nom vide")
+    return debut, fin
+
+
+@app.get("/api/evenements")
+def events_list(user: dict = User):
+    """Évènements avec leur coût net (dépenses de la période ± exclusions/ajouts)."""
+    uid = user["id"]
+    tx = analytics.apply_links(db.fetch_transactions(uid))
+    out = []
+    for ev in db.event_list(uid):
+        r = analytics.event_report(tx, ev, db.event_overrides(uid, ev["id"]))
+        out.append({**ev, "total": r["total"], "nb": r["nb"],
+                    "depense": r["depense"], "recu": r["recu"],
+                    "par_categorie": r["par_categorie"][:4]})
+    return out
+
+
+@app.post("/api/evenements")
+def event_create(body: EventBody, user: dict = User):
+    debut, fin = _event_dates(body)
+    eid = db.event_create(user["id"], body.nom.strip(), debut, fin)
+    return {"id": eid}
+
+
+@app.patch("/api/evenements/{eid}")
+def event_patch(eid: int, body: EventBody, user: dict = User):
+    if not db.event_get(user["id"], eid):
+        raise HTTPException(404, "Évènement inconnu")
+    debut, fin = _event_dates(body)
+    db.event_update(user["id"], eid, body.nom.strip(), debut, fin)
+    return {"ok": True}
+
+
+@app.delete("/api/evenements/{eid}")
+def event_remove(eid: int, user: dict = User):
+    if not db.event_get(user["id"], eid):
+        raise HTTPException(404, "Évènement inconnu")
+    db.event_delete(user["id"], eid)
+    return {"ok": True}
+
+
+@app.get("/api/evenements/{eid}")
+def event_detail(eid: int, user: dict = User):
+    """Détail : opérations (statut auto/inclus/exclu), total net, par catégorie."""
+    uid = user["id"]
+    ev = db.event_get(uid, eid)
+    if not ev:
+        raise HTTPException(404, "Évènement inconnu")
+    tx = analytics.apply_links(db.fetch_transactions(uid))
+    return {**ev, **analytics.event_report(tx, ev, db.event_overrides(uid, eid))}
+
+
+@app.post("/api/evenements/{eid}/override")
+def event_override(eid: int, body: EventOverride, user: dict = User):
+    """exclure : l'opération de la période n'a « rien à voir » avec l'évènement ;
+    inclure : ajoute une opération (même hors période) ; auto : annule."""
+    uid = user["id"]
+    if not db.event_get(uid, eid):
+        raise HTTPException(404, "Évènement inconnu")
+    if not db.get_transaction(uid, body.op_id):
+        raise HTTPException(404, "Opération inconnue")
+    if body.mode not in ("exclure", "inclure", "auto"):
+        raise HTTPException(400, "mode ∈ {exclure, inclure, auto}")
+    db.event_override_set(uid, eid, body.op_id,
+                          {"exclure": 0, "inclure": 1, "auto": None}[body.mode])
     return {"ok": True}
 
 
@@ -676,6 +769,19 @@ def objectif_get(user: dict = User):
 @app.post("/api/settings/objectif")
 def objectif_set(body: Objectif, user: dict = User):
     db.setting_set(f"objectif:{user['id']}", str(body.montant) if body.montant > 0 else "")
+    return {"montant": body.montant if body.montant > 0 else None}
+
+
+@app.get("/api/settings/revenu")
+def revenu_get(user: dict = User):
+    val = db.setting_get(f"revenu:{user['id']}")
+    return {"montant": float(val) if val else None}
+
+
+@app.post("/api/settings/revenu")
+def revenu_set(body: Objectif, user: dict = User):
+    """Revenu mensuel estimé : sert au « reste à dépenser » de la page Budget."""
+    db.setting_set(f"revenu:{user['id']}", str(body.montant) if body.montant > 0 else "")
     return {"montant": body.montant if body.montant > 0 else None}
 
 

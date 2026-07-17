@@ -99,6 +99,7 @@ RULES = {
                              "sncf", "ilevia", "ratp", "uber", "blablacar", "total energ",
                              "esso", "bp ", "shell", "peage", "vinci", "essence", "metro",
                              "sanef", "aprr", "asf ", "parking", "flixbus", "ouigo",
+                             "m tag", "m-tag", "tag.fr",
                              "effia", "velib", "airbnb", "booking", "hotel", "ryanair",
                              "easyjet", "transavia"],
     "Cadeaux & Dons": ["leetchi", "lepotcommun", "le pot commun", "cadeau", "fleuriste",

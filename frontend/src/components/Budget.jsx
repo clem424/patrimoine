@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api, eur, eur0 } from '../lib/api.js'
+import { useSort, arrow } from '../lib/useSort.js'
 
 // Catégories qui ne sont pas des dépenses : pas de budget possible dessus.
 const SANS_BUDGET = ['Revenus', 'Virements internes', 'Non catégorisé', 'Épargne']
@@ -18,6 +19,16 @@ export default function Budget({ onChange }) {
   const [status, setStatus] = useState(null)     // budgets + dépenses du mois
   const [depenses, setDepenses] = useState(null) // dépenses par catégorie du mois
   const [draft, setDraft] = useState({})         // saisies en cours {cat: '250'}
+  const [revDraft, setRevDraft] = useState(null) // saisie du revenu estimé
+  const { tri, toggle, sortRows } = useSort('categorie', 1)
+
+  const saveRevenu = async () => {
+    if (revDraft === null) return
+    const val = parseFloat(String(revDraft).replace(',', '.'))
+    await api.revenuSet(isNaN(val) ? 0 : val)
+    setRevDraft(null)
+    await load()
+  }
 
   const mois = moisStr(dec)
 
@@ -33,9 +44,12 @@ export default function Budget({ onChange }) {
 
   const budgets = Object.fromEntries(status.lignes.map((l) => [l.categorie, l.budget]))
   const spent = Object.fromEntries(depenses.categories.map((c) => [c.categorie, c.montant]))
-  const rows = cats.filter((c) => !SANS_BUDGET.includes(c))
-    .map((c) => ({ categorie: c, budget: budgets[c] ?? null, depense: spent[c] ?? 0 }))
-    .sort((a, b) => (b.budget ?? -1) - (a.budget ?? -1) || b.depense - a.depense)
+  const rows = sortRows(
+    cats.filter((c) => !SANS_BUDGET.includes(c))
+      .map((c) => ({ categorie: c, budget: budgets[c] ?? null, depense: spent[c] ?? 0 })),
+    { categorie: (r) => r.categorie, budget: (r) => r.budget,
+      depense: (r) => r.depense,
+      reste: (r) => r.budget != null ? r.budget - r.depense : null })
 
   const save = async (cat) => {
     if (!(cat in draft)) return
@@ -49,12 +63,22 @@ export default function Budget({ onChange }) {
   const totalDep = rows.reduce((s, r) => s + (r.budget != null ? r.depense : 0), 0)
   const ok = totalDep <= totalBudget
 
+  // Revenu estimé -> reste à dépenser (réel) et épargne prévue (si budgets tenus).
+  const revenu = status.revenu || 0
+  const depMois = totalDep + (status.hors_budget || 0)   // toutes dépenses du mois
+  const reste = revenu - depMois
+  const epargnePrevue = revenu - totalBudget
+  // Barre de répartition du revenu : dépensé | budget restant engagé | libre
+  const segDep = Math.min(depMois, revenu)
+  const segEngage = Math.max(0, Math.min(totalBudget - depMois, revenu - segDep))
+  const segLibre = Math.max(0, revenu - segDep - segEngage)
+
   return (
     <>
       <div className="page-head row between">
         <div>
           <h1>Budget prévisionnel</h1>
-          <p>Fixe un plafond mensuel par catégorie et suis-le mois par mois.</p>
+          <p>Plafond mensuel par catégorie, suivi mois par mois.</p>
         </div>
         <div className="seg">
           <button onClick={() => setDec((x) => x - 1)} title="Mois précédent">‹</button>
@@ -65,24 +89,76 @@ export default function Budget({ onChange }) {
         </div>
       </div>
 
-      {totalBudget > 0 && (
+      {/* Revenu mensuel estimé -> reste à dépenser calculé automatiquement */}
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <h3 style={{ margin: 0 }}>Revenu mensuel estimé</h3>
+          <input type="number" step="50" min="0" placeholder="ex : 1800"
+            style={{ width: 120, textAlign: 'right', marginLeft: 'auto' }}
+            value={revDraft ?? (status.revenu ?? '')}
+            onChange={(e) => setRevDraft(e.target.value)}
+            onBlur={saveRevenu}
+            onKeyDown={(e) => e.key === 'Enter' && e.target.blur()} />
+          <span className="muted" style={{ fontSize: 12 }}>€/mois</span>
+        </div>
+        {revenu > 0 && (
+          <p className="muted" style={{ fontSize: 12.5, margin: '8px 0 0' }}>
+            Repère 50/30/20 : besoins ~{eur0(revenu * 0.5)} · envies ~{eur0(revenu * 0.3)}
+            {' '}· épargne ~{eur0(revenu * 0.2)}.
+          </p>
+        )}
+      </div>
+
+      {(revenu > 0 || totalBudget > 0) && (
         <div className="card hero" style={{ marginBottom: 18 }}>
           <div className="eyebrow">{moisLabel(mois)}</div>
-          <div className="total" style={{ fontSize: 38 }}>
-            <span className={ok ? 'pos' : 'neg'}>{eur0(totalDep)}</span>
-            <span className="cts"> / {eur0(totalBudget)} budgétés</span>
-          </div>
-          <div className="sub">
-            {ok
-              ? `✓ Budget respecté — il reste ${eur0(totalBudget - totalDep)} ce mois-ci.`
-              : `⚠ Dépassement de ${eur0(totalDep - totalBudget)} sur les catégories budgétées.`}
-            {status.hors_budget > 0 &&
-              ` (+ ${eur0(status.hors_budget)} hors catégories budgétées)`}
-          </div>
-          <div className="allocbar" style={{ marginBottom: 4 }}>
-            <span style={{ width: `${Math.min(100, (totalDep / totalBudget) * 100)}%`,
-              background: ok ? 'var(--emerald)' : 'var(--clay)' }} />
-          </div>
+          {revenu > 0 ? (
+            <>
+              <div className="total" style={{ fontSize: 38 }}>
+                <span className={reste >= 0 ? 'pos' : 'neg'}>{eur0(reste)}</span>
+                <span className="cts"> restants sur {eur0(revenu)}</span>
+              </div>
+              <div className="sub">
+                Dépensé ce mois : {eur0(depMois)}
+                {totalBudget > 0 && (epargnePrevue >= 0
+                  ? ` · épargne prévue si budgets tenus : ${eur0(epargnePrevue)}/mois`
+                  : ` · ⚠ budgets (${eur0(totalBudget)}) supérieurs au revenu`)}
+              </div>
+              <div className="allocbar" style={{ marginBottom: 4 }}>
+                {segDep > 0 && <span title={`Dépensé · ${eur0(segDep)}`}
+                  style={{ width: `${(segDep / revenu) * 100}%`, background: 'var(--clay)' }} />}
+                {segEngage > 0 && <span title={`Encore budgété · ${eur0(segEngage)}`}
+                  style={{ width: `${(segEngage / revenu) * 100}%`, background: 'var(--indigo)' }} />}
+                {segLibre > 0 && <span title={`Libre / épargne · ${eur0(segLibre)}`}
+                  style={{ width: `${(segLibre / revenu) * 100}%`, background: 'var(--emerald)' }} />}
+              </div>
+              <div className="sub" style={{ fontSize: 11.5 }}>
+                <span style={{ color: 'var(--clay)' }}>■</span> dépensé ·{' '}
+                <span style={{ color: 'var(--indigo)' }}>■</span> encore budgété ·{' '}
+                <span style={{ color: 'var(--emerald)' }}>■</span> libre / épargne
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="total" style={{ fontSize: 38 }}>
+                <span className={ok ? 'pos' : 'neg'}>{eur0(totalDep)}</span>
+                <span className="cts"> / {eur0(totalBudget)} budgétés</span>
+              </div>
+              <div className="allocbar" style={{ marginBottom: 4 }}>
+                <span style={{ width: `${Math.min(100, (totalDep / totalBudget) * 100)}%`,
+                  background: ok ? 'var(--emerald)' : 'var(--clay)' }} />
+              </div>
+            </>
+          )}
+          {totalBudget > 0 && (
+            <div className="sub">
+              {ok
+                ? `✓ Budgets respectés — reste ${eur0(totalBudget - totalDep)} sur les catégories budgétées.`
+                : `⚠ Dépassement de ${eur0(totalDep - totalBudget)} sur les catégories budgétées.`}
+              {status.hors_budget > 0 &&
+                ` (+ ${eur0(status.hors_budget)} hors catégories budgétées)`}
+            </div>
+          )}
         </div>
       )}
 
@@ -90,16 +166,22 @@ export default function Budget({ onChange }) {
         <h3>Plafonds mensuels par catégorie</h3>
         {totalBudget === 0 && (
           <div className="banner" style={{ marginBottom: 14 }}>
-            Aucun budget défini. Saisis un montant en face d'une catégorie (il s'applique
-            à tous les mois) — laisse vide ou mets 0 pour le retirer.
+            Aucun budget défini — saisir un montant en face d'une catégorie
+            (0 ou vide pour le retirer).
           </div>
         )}
         <table className="budget-table">
           <thead>
-            <tr><th>Catégorie</th><th style={{ width: 130 }}>Budget / mois</th>
+            <tr>
+              <th className="sortable" onClick={() => toggle('categorie', 1)}>
+                Catégorie{arrow(tri, 'categorie')}</th>
+              <th className="sortable" style={{ width: 130 }} onClick={() => toggle('budget')}>
+                Budget / mois{arrow(tri, 'budget')}</th>
               <th>Progression</th>
-              <th style={{ textAlign: 'right' }}>Dépensé</th>
-              <th style={{ textAlign: 'right' }}>Reste</th></tr>
+              <th className="sortable" style={{ textAlign: 'right' }}
+                onClick={() => toggle('depense')}>Dépensé{arrow(tri, 'depense')}</th>
+              <th className="sortable" style={{ textAlign: 'right' }}
+                onClick={() => toggle('reste')}>Reste{arrow(tri, 'reste')}</th></tr>
           </thead>
           <tbody>
             {rows.map((r) => {
@@ -136,10 +218,6 @@ export default function Budget({ onChange }) {
             })}
           </tbody>
         </table>
-        <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-          Le budget est mensuel et identique chaque mois. Les dépenses comptées sont celles
-          des catégories ci-dessus (virements internes et épargne exclus).
-        </p>
       </div>
     </>
   )

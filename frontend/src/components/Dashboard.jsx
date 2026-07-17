@@ -4,6 +4,7 @@ import {
   CartesianGrid, Cell, FunnelChart, Funnel, LabelList, ReferenceLine,
 } from 'recharts'
 import { api, eur, eur0, mois, classColor, isHidden, cssVar } from '../lib/api.js'
+import { useSort, arrow } from '../lib/useSort.js'
 import { Eye, EyeOff } from './icons.jsx'
 
 // Couleurs des graphiques lues sur le thème courant (clair/sombre).
@@ -50,6 +51,8 @@ export default function Dashboard({ goImport }) {
   const [extra, setExtra] = useState(0)
   const [ccInclus, setCcInclus] = useState(false)
   const [proj, setProj] = useState(null)
+  const aboTri = useSort('montant')
+  const marTri = useSort('montant')
   // masquage individuel (persistant) : total et classes d'actifs
   const [maskTotal, setMaskTotal] = useState(localStorage.getItem('mask_total') === '1')
   const [maskCls, setMaskCls] = useState(
@@ -90,7 +93,7 @@ export default function Dashboard({ goImport }) {
     return (
       <div className="empty card">
         <div className="big">Rien à afficher pour l'instant</div>
-        <p>Importe un relevé BoursoBank ou Crédit Agricole, ou ajoute un actif.</p>
+        <p>Importer un relevé BoursoBank ou Crédit Agricole, ou ajouter un actif.</p>
         <button className="btn primary" onClick={goImport}>Importer un relevé</button>
       </div>
     )
@@ -173,7 +176,7 @@ export default function Dashboard({ goImport }) {
               <div className="stat">
                 <div className={'k ' + (d.kpis.taux_epargne >= 0 ? 'pos' : 'neg')}>
                   {d.kpis.taux_epargne}%</div>
-                <div className="l">taux d'épargne (part des revenus non dépensée)</div>
+                <div className="l">taux d'épargne</div>
               </div>
             )}
             <div className="stat">
@@ -220,10 +223,6 @@ export default function Dashboard({ goImport }) {
                 fill="url(#gh)" />
             </AreaChart>
           </ResponsiveContainer>
-          <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-            Relevé automatique à chaque visite (1 point par jour) — l'historique
-            s'enrichit avec le temps.
-          </p>
         </div>
       )}
 
@@ -299,20 +298,15 @@ export default function Dashboard({ goImport }) {
             </AreaChart>
           </ResponsiveContainer>
           <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-            Intérêts composés : chaque actif compose à sa croissance visée (page
-            Patrimoine) et ton épargne mensuelle est réputée investie au taux visé
-            moyen. Pointillés : la même épargne laissée à 0 % — l'écart entre les
-            deux courbes, ce sont les intérêts composés.
-            {extra > 0 && <> Trait vert : pareil, en investissant {extra} €/mois de plus.</>}
-            {!ccInclus && <> Comptes courants exclus{d.objectif > 0
-              && ' (l\'objectif, lui, porte sur le patrimoine total)'}.</>}
-            {' '}C'est une projection, pas une promesse.
+            Intérêts composés au taux visé de chaque actif, épargne investie au taux
+            moyen. Pointillés : sans croissance.
+            {extra > 0 && <> Trait vert : avec {extra} €/mois investis en plus.</>}
+            {!ccInclus && <> Comptes courants exclus.</>}
           </p>
           {proj.taux_moyen === 0 && (
             <p className="banner warn" style={{ fontSize: 12.5, marginTop: 10, marginBottom: 0 }}>
-              Taux visé moyen : 0 %/an — la courbe restera une droite tant qu'aucun
-              actif n'a de « croissance visée ». Renseigne-la sur ton PEA, tes livrets…
-              (Patrimoine → Éditer → Suivi de croissance & pays, ex : PEA 7, Livret A 1,7).
+              Aucune croissance visée renseignée (taux moyen 0 %) : la courbe reste
+              une droite. À définir dans Patrimoine → Croissance visée par classe.
             </p>
           )}
         </div>
@@ -341,7 +335,7 @@ export default function Dashboard({ goImport }) {
           </AreaChart>
         </ResponsiveContainer>
         <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-          Reconstruit à partir du solde actuel et de tes flux importés.
+          Reconstruite à partir du solde actuel et des flux importés.
         </p>
       </div>
 
@@ -367,7 +361,7 @@ export default function Dashboard({ goImport }) {
         <div className="card">
           <h3>Pyramide du patrimoine</h3>
           {d.repartition.length === 0
-            ? <p className="muted">Ajoute des actifs pour voir la pyramide.</p>
+            ? <p className="muted">Aucun actif pour l'instant.</p>
             : (
               <ResponsiveContainer width="100%" height={260}>
                 <FunnelChart>
@@ -386,9 +380,6 @@ export default function Dashboard({ goImport }) {
                 </FunnelChart>
               </ResponsiveContainer>
             )}
-          <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-            Base large = classe la plus lourde ; sommet = la plus légère.
-          </p>
         </div>
       </div>
 
@@ -452,7 +443,7 @@ export default function Dashboard({ goImport }) {
         {dep && (
           <p className="muted" style={{ fontSize: 12.5, margin: '10px 0 4px' }}>
             {periodeLabel(dep)} · total : <b>{eur(dep.total)}</b>
-            {' '}· clique une barre pour voir <b>où</b> l'argent est parti
+            {' '}· détail par marchand au clic sur une barre
           </p>
         )}
         {!dep || dep.categories.length === 0
@@ -492,12 +483,18 @@ export default function Dashboard({ goImport }) {
                     Aucune dépense « {selCat} » sur cette période.</p>
                 : (
                   <table style={{ marginTop: 8 }}>
-                    <thead><tr><th>Marchand</th>
-                      <th style={{ textAlign: 'right' }}>Fois</th>
-                      <th style={{ textAlign: 'right' }}>Total</th>
+                    <thead><tr>
+                      <th className="sortable" onClick={() => marTri.toggle('marchand', 1)}>
+                        Marchand{arrow(marTri.tri, 'marchand')}</th>
+                      <th className="sortable" style={{ textAlign: 'right' }}
+                        onClick={() => marTri.toggle('nb')}>Fois{arrow(marTri.tri, 'nb')}</th>
+                      <th className="sortable" style={{ textAlign: 'right' }}
+                        onClick={() => marTri.toggle('montant')}>Total{arrow(marTri.tri, 'montant')}</th>
                       <th style={{ textAlign: 'right' }}>Part</th></tr></thead>
                     <tbody>
-                      {marchands.marchands.map((m, i) => (
+                      {marTri.sortRows(marchands.marchands,
+                        { marchand: (m) => m.marchand, nb: (m) => m.nb,
+                          montant: (m) => m.montant }).map((m, i) => (
                         <tr key={i}>
                           <td className="lib">{m.marchand}</td>
                           <td className="num">{m.nb}×</td>
@@ -520,11 +517,19 @@ export default function Dashboard({ goImport }) {
           ? <p className="muted">Aucun récurrent identifié pour l'instant.</p>
           : (
             <table>
-              <thead><tr><th>Libellé</th><th>Catégorie</th>
-                <th style={{ textAlign: 'right' }}>Montant moyen</th>
-                <th style={{ textAlign: 'right' }}>Occurrences</th></tr></thead>
+              <thead><tr>
+                <th className="sortable" onClick={() => aboTri.toggle('libelle', 1)}>
+                  Libellé{arrow(aboTri.tri, 'libelle')}</th>
+                <th className="sortable" onClick={() => aboTri.toggle('categorie', 1)}>
+                  Catégorie{arrow(aboTri.tri, 'categorie')}</th>
+                <th className="sortable" style={{ textAlign: 'right' }}
+                  onClick={() => aboTri.toggle('montant')}>Montant moyen{arrow(aboTri.tri, 'montant')}</th>
+                <th className="sortable" style={{ textAlign: 'right' }}
+                  onClick={() => aboTri.toggle('occurrences')}>Occurrences{arrow(aboTri.tri, 'occurrences')}</th></tr></thead>
               <tbody>
-                {d.abonnements.map((a, i) => (
+                {aboTri.sortRows(d.abonnements,
+                  { libelle: (a) => a.libelle, categorie: (a) => a.categorie,
+                    montant: (a) => a.montant, occurrences: (a) => a.occurrences }).map((a, i) => (
                   <tr key={i}>
                     <td className="lib">{a.libelle}</td>
                     <td><span className="cat-pill">{a.categorie}</span></td>

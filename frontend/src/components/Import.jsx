@@ -35,8 +35,8 @@ export default function Import({ onChange }) {
         onDragOver={(e) => { e.preventDefault(); setOver(true) }}
         onDragLeave={() => setOver(false)} onDrop={onDrop}
         onClick={() => document.getElementById('fileinput').click()}>
-        <div className="big">{busy ? 'Import en cours…' : 'Dépose tes fichiers ici'}</div>
-        <div className="small">ou clique pour parcourir · plusieurs fichiers acceptés</div>
+        <div className="big">{busy ? 'Import en cours…' : 'Déposer les fichiers ici'}</div>
+        <div className="small">ou cliquer pour parcourir · plusieurs fichiers acceptés</div>
         <input id="fileinput" type="file" multiple hidden
           accept=".csv,.xlsx,.xls"
           onChange={(e) => handleFiles([...e.target.files])} />

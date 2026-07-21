@@ -53,12 +53,13 @@ export const api = {
   categorize: (useOllama = true) =>
     q(`/api/categorize?use_ollama=${useOllama}`, { method: 'POST' }),
   recategorize: () => q('/api/recategorize', { method: 'POST' }),
+  categorizeProgress: () => q('/api/categorize/progress'),
   setCategory: (opId, categorie) =>
     q(`/api/transactions/${opId}/category`, PATCH({ categorie })),
   confirmTx: (opId, confirme) =>
     q(`/api/transactions/${opId}/confirm`, POST({ confirme })),
-  setDue: (opId, du) =>
-    q(`/api/transactions/${opId}/rembourser`, POST({ du })),
+  setDue: (opId, du, par = '') =>
+    q(`/api/transactions/${opId}/rembourser`, POST({ du, par })),
   lierOps:  (op_ids) => q('/api/transactions/lier', POST({ op_ids })),
   delierOp: (opId) => q(`/api/transactions/${opId}/delier`, { method: 'POST' }),
 
@@ -124,6 +125,14 @@ export const api = {
   budgetGet:       (mois) => q('/api/budget' + (mois ? `?mois=${mois}` : '')),
   budgetSet:       (categorie, montant) => q('/api/budget',
     { method: 'PUT', body: JSON.stringify({ categorie, montant }) }),
+
+  analyse:         () => q('/api/analyse'),
+  analyseMarkdown: async () => {
+    const r = await fetch('/api/export/analyse.md',
+      { headers: TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {} })
+    if (!r.ok) throw new Error('Export impossible (HTTP ' + r.status + ')')
+    return r.text()
+  },
 }
 
 // ---- mode confidentialité : masque tous les montants de l'app ----

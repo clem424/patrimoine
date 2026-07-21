@@ -19,9 +19,56 @@ from __future__ import annotations
 import os
 import re
 import json
+import threading
 import requests
 
 import db
+
+
+# ---- Progression du classement (pour l'UI) --------------------------------- #
+# Suivi léger, en mémoire : combien d'opérations parcourues et combien de
+# questions posées à Ollama (le facteur temps réel, ~20 s chacune sur le Pi).
+# uvicorn tourne en process unique -> l'état est partagé entre requêtes ; les
+# endpoints synchrones s'exécutant dans un threadpool, on protège par un verrou.
+# Clé = user_id (un classement à la fois par profil).
+_progress: dict[int, dict] = {}
+_plock = threading.Lock()
+
+
+def progress_start(uid: int, total: int, phase: str = "") -> None:
+    with _plock:
+        _progress[uid] = {"running": True, "phase": phase,
+                          "total": total, "done": 0, "questions": 0}
+
+
+def progress_tick(uid: int) -> None:
+    """Une opération de plus parcourue."""
+    with _plock:
+        p = _progress.get(uid)
+        if p:
+            p["done"] += 1
+
+
+def progress_question(uid: int) -> None:
+    """Une question de plus posée à Ollama (le pas lent)."""
+    with _plock:
+        p = _progress.get(uid)
+        if p:
+            p["questions"] += 1
+
+
+def progress_end(uid: int) -> None:
+    with _plock:
+        p = _progress.get(uid)
+        if p:
+            p["running"] = False
+
+
+def get_progress(uid: int) -> dict:
+    """État courant pour le front ; {running: False} si aucun classement récent."""
+    with _plock:
+        p = _progress.get(uid)
+        return dict(p) if p else {"running": False}
 
 # Configurables par variable d'environnement (voir docker-compose.yml).
 OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/") + "/api/generate"
@@ -289,40 +336,46 @@ def recategorize(uid: int) -> dict:
     mods = []       # détail avant -> après, renvoyé au frontend pour contrôle
     ollama_ok, questions = True, 0
 
-    for tx in targets:
-        cle = _cle(tx["libelle"])
-        if cle in resolu:
-            cat, how = resolu[cle]
-        else:
-            manual = db.cache_get(uid, cle, origin="manual")
-            if manual and manual in valides:
-                cat, how = manual, "cache"
+    progress_start(uid, len(targets), "Recatégorisation")
+    try:
+        for tx in targets:
+            cle = _cle(tx["libelle"])
+            if cle in resolu:
+                cat, how = resolu[cle]
             else:
-                cat = by_rules(tx["libelle"])
-                if cat and cat in valides:
-                    how = "rule"
-                elif ollama_ok and questions < MAX_QUESTIONS_OLLAMA:
-                    questions += 1
-                    cat = by_ollama(uid, tx["libelle"], tx["montant"])
-                    if cat:
-                        db.cache_set(uid, cle, cat)   # rafraîchit la mémoire apprise
-                        how = "ollama"
-                    else:
-                        ollama_ok = False             # Ollama en panne : on n'insiste pas
-                        how = "reste"
+                manual = db.cache_get(uid, cle, origin="manual")
+                if manual and manual in valides:
+                    cat, how = manual, "cache"
                 else:
-                    cat, how = None, "reste"
-            resolu[cle] = (cat, how)
+                    cat = by_rules(tx["libelle"])
+                    if cat and cat in valides:
+                        how = "rule"
+                    elif ollama_ok and questions < MAX_QUESTIONS_OLLAMA:
+                        questions += 1
+                        progress_question(uid)
+                        cat = by_ollama(uid, tx["libelle"], tx["montant"])
+                        if cat:
+                            db.cache_set(uid, cle, cat)   # rafraîchit la mémoire apprise
+                            how = "ollama"
+                        else:
+                            ollama_ok = False             # Ollama en panne : on n'insiste pas
+                            how = "reste"
+                    else:
+                        cat, how = None, "reste"
+                resolu[cle] = (cat, how)
 
-        if cat is None:
-            stats["reste"] += 1
-        elif cat != tx["categorie"]:
-            db.update_category(uid, tx["op_id"], cat, how)
-            mods.append({"op_id": tx["op_id"], "date": tx["date"],
-                         "libelle": tx["libelle"], "montant": tx["montant"],
-                         "avant": tx["categorie"], "apres": cat, "how": how})
-            stats["modifiees"] += 1
-        else:
-            stats["inchangees"] += 1
+            if cat is None:
+                stats["reste"] += 1
+            elif cat != tx["categorie"]:
+                db.update_category(uid, tx["op_id"], cat, how)
+                mods.append({"op_id": tx["op_id"], "date": tx["date"],
+                             "libelle": tx["libelle"], "montant": tx["montant"],
+                             "avant": tx["categorie"], "apres": cat, "how": how})
+                stats["modifiees"] += 1
+            else:
+                stats["inchangees"] += 1
+            progress_tick(uid)
+    finally:
+        progress_end(uid)
     stats["modifications"] = mods
     return stats

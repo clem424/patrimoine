@@ -32,7 +32,9 @@ import stocks
 import binance
 import analytics
 from analytics import ASSET_CLASSES
-from categorize import categorize, recategorize, all_categories, _cle
+from categorize import (categorize, recategorize, all_categories, _cle,
+                        get_progress, progress_start, progress_tick,
+                        progress_question, progress_end)
 
 app = FastAPI(title="Patrimoine")
 # Pas de CORS : le frontend est servi par ce même serveur (et le dev Vite proxifie
@@ -145,14 +147,16 @@ def set_category(op_id: str, body: CatUpdate, user: dict = User):
 
 class DueBody(BaseModel):
     du: bool
+    par: str = ""           # nom du débiteur (facultatif)
 
 
 @app.post("/api/transactions/{op_id}/rembourser")
 def mark_due(op_id: str, body: DueBody, user: dict = User):
-    """Marque une dépense « à rembourser » (suivi de ce que les autres te doivent)."""
+    """Marque une dépense « à rembourser » (suivi de ce que les autres te doivent),
+    avec éventuellement le nom de la personne qui doit ce montant."""
     if not db.get_transaction(user["id"], op_id):
         raise HTTPException(404, "Opération inconnue")
-    db.set_due(user["id"], op_id, body.du)
+    db.set_due(user["id"], op_id, body.du, body.par)
     return {"ok": True}
 
 
@@ -219,12 +223,19 @@ def run_categorization(use_ollama: bool = True, user: dict = User):
     uid = user["id"]
     todo = db.fetch_uncategorized(uid)
     stats = defaultdict(int)
-    for tx in todo:
-        cat, how = categorize(uid, tx["libelle"], montant=tx["montant"],
-                              use_ollama=use_ollama)
-        if cat != "Non catégorisé":
-            db.update_category(uid, tx["op_id"], cat, how)
-        stats[how] += 1
+    progress_start(uid, len(todo), "Catégorisation")
+    try:
+        for tx in todo:
+            cat, how = categorize(uid, tx["libelle"], montant=tx["montant"],
+                                  use_ollama=use_ollama)
+            if how == "ollama":
+                progress_question(uid)
+            if cat != "Non catégorisé":
+                db.update_category(uid, tx["op_id"], cat, how)
+            stats[how] += 1
+            progress_tick(uid)
+    finally:
+        progress_end(uid)
     return {"traitees": len(todo), "detail": dict(stats)}
 
 
@@ -233,6 +244,13 @@ def run_recategorization(user: dict = User):
     """Réexamine toutes les opérations non confirmées (✓) avec l'apprentissage
     à jour — à lancer après une session de corrections manuelles."""
     return recategorize(user["id"])
+
+
+@app.get("/api/categorize/progress")
+def categorization_progress(user: dict = User):
+    """État en direct du classement en cours (pour l'affichage front) :
+    {running, phase, total, done, questions}."""
+    return get_progress(user["id"])
 
 
 # ------------------------------------------------------------ CATÉGORIES ---- #
@@ -874,6 +892,76 @@ def revenu_set(body: Objectif, user: dict = User):
     """Revenu mensuel estimé : sert au « reste à dépenser » de la page Budget."""
     db.setting_set(f"revenu:{user['id']}", str(body.montant) if body.montant > 0 else "")
     return {"montant": body.montant if body.montant > 0 else None}
+
+
+# ------------------------------------------------------------- ANALYSE ---- #
+def _build_analysis(uid: int) -> dict:
+    """Assemble l'analyse complète du profil (réutilisée par la page Analyse
+    et par l'export Markdown pour Claude)."""
+    assets = _assets_with_live_prices(uid)
+    tx = db.fetch_transactions(uid)
+    tx_net = analytics.apply_links(tx)
+    patrimoine, repartition = analytics.repartition_par_classe(assets, _type_labels(uid))
+    labels = {**ASSET_CLASSES, **_type_labels(uid)}
+    depuis_1an = (dt.date.today() - dt.timedelta(days=365)).isoformat()
+    trends, ref = analytics.category_trends(tx_net)
+    anomalies, _ = analytics.spending_anomalies(tx_net)
+    objectif = db.setting_get(f"objectif:{uid}")
+    revenu = db.setting_get(f"revenu:{uid}")
+    actifs = [{"nom": a["nom"], "classe": labels.get(a["type"], a["type"]),
+               "prix_achat": a["prix_achat"], "valeur": a.get("valeur") or 0,
+               "plus_value": a.get("plus_value"), "perf_pct": a.get("perf_pct"),
+               "perf_annuelle": a.get("perf_annuelle")}
+              for a in assets if a.get("prix_achat")]
+    # Données brutes pour le moteur de conseils : valeur par classe d'actif,
+    # chaque ligne d'actif, et la présence d'une routine d'investissement.
+    par_type = defaultdict(float)
+    for a in assets:
+        par_type[a["type"]] += a.get("valeur") or 0
+    lignes_actifs = [{"nom": a["nom"], "type": a["type"], "valeur": a.get("valeur") or 0}
+                     for a in assets]
+    kp = analytics.kpis(tx_net, patrimoine)
+    ctx = {
+        "genere_le": dt.date.today().isoformat(),
+        "patrimoine": patrimoine,
+        "objectif": float(objectif) if objectif else None,
+        "revenu_estime": float(revenu) if revenu else None,
+        "repartition": repartition,
+        "pays": analytics.repartition_par_pays(assets),
+        "kpis": kp,
+        "epargne_series": analytics.savings_rate_series(tx_net),
+        "depenses_12m": analytics.spending_by_category(tx_net, depuis_1an),
+        "mois_reference": ref,
+        "tendances": trends,
+        "anomalies": anomalies,
+        "abonnements": analytics.detect_subscriptions(tx),
+        "grosses_depenses": analytics.biggest_expenses(tx_net),
+        "actifs": actifs,
+        "budget": analytics.budget_status(tx_net, db.budget_list(uid),
+                                          dt.date.today().strftime("%Y-%m")),
+        "nb_transactions": len(tx),
+        # champs internes pour le moteur de conseils
+        "par_type": dict(par_type),
+        "lignes_actifs": lignes_actifs,
+        "a_routine": bool(db.routine_list(uid)),
+    }
+    ctx["conseils"] = analytics.investment_advice(ctx)
+    return ctx
+
+
+@app.get("/api/analyse")
+def analyse(user: dict = User):
+    """Analyse locale complète (taux d'épargne, tendances, anomalies, récurrents…)."""
+    return _build_analysis(user["id"])
+
+
+@app.get("/api/export/analyse.md")
+def export_analyse_md(user: dict = User):
+    """Rapport d'analyse en Markdown, prêt à coller dans Claude (généré localement)."""
+    md = analytics.markdown_report(_build_analysis(user["id"]))
+    return Response(md, media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition":
+                             'attachment; filename="analyse-patrimoine.md"'})
 
 
 @app.get("/api/export/transactions.csv")

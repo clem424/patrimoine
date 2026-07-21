@@ -54,6 +54,9 @@ export default function Transactions({ onChange }) {
   const [fSens, setFSens] = useState('tout')      // tout | depenses | revenus
   const [fConf, setFConf] = useState('tout')      // tout | a_verifier | ok
   const [fDu, setFDu] = useState(false)           // ne montrer que l'« à rembourser »
+  const [fDuQui, setFDuQui] = useState(null)      // filtrer sur un débiteur précis
+  const [dueEdit, setDueEdit] = useState(null)    // op_id dont on édite le débiteur
+  const [dueName, setDueName] = useState('')      // nom en cours de saisie
   const [tri, setTri] = useState({ key: 'date', dir: -1 })   // -1 = décroissant
   // Modifications du dernier réexamen (persistées : contrôlables même après reload)
   const [mods, setMods] = useState(() => {
@@ -81,11 +84,18 @@ export default function Transactions({ onChange }) {
   const catsTriees = useMemo(
     () => [...cats].sort((a, b) => a.localeCompare(b, 'fr')), [cats])
 
-  // Total « à rembourser » (toutes périodes confondues) : ce qu'on te doit.
+  // Total « à rembourser » (toutes périodes confondues) : ce qu'on te doit,
+  // ventilé par personne (nom vide -> « Sans nom »).
   const du = useMemo(() => {
     const items = (tx || []).filter((t) => t.a_rembourser)
+    const parPersonne = {}
+    for (const t of items) {
+      const who = (t.du_par || '').trim() || 'Sans nom'
+      parPersonne[who] = (parPersonne[who] || 0) + Math.abs(t.montant)
+    }
     return { n: items.length,
-             total: items.reduce((s, t) => s + Math.abs(t.montant), 0) }
+             total: items.reduce((s, t) => s + Math.abs(t.montant), 0),
+             parPersonne: Object.entries(parPersonne).sort((a, b) => b[1] - a[1]) }
   }, [tx])
 
   // Groupes de remboursement : N virements reçus remboursent N dépenses
@@ -164,6 +174,7 @@ export default function Transactions({ onChange }) {
       (fSens === 'tout' || (fSens === 'depenses' ? t.montant < 0 : t.montant >= 0)) &&
       (fConf === 'tout' || (fConf === 'ok' ? etat(t) === 'ok' : etat(t) !== 'ok')) &&
       (!fDu || t.a_rembourser) &&
+      (!fDuQui || ((t.du_par || '').trim() || 'Sans nom') === fDuQui) &&
       (!fLie || t.lien_groupe) &&
       (!fMods || modMap.has(t.op_id)) &&
       (!q || t.libelle.toLowerCase().includes(q.toLowerCase()))
@@ -175,7 +186,7 @@ export default function Transactions({ onChange }) {
     // texte (catégorie, libellé) : alphabétique, puis date récente à égalité
     return a[tri.key].localeCompare(b[tri.key], 'fr') * tri.dir
       || (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)
-  }), [tx, debut, fin, fSource, fCat, fSens, fConf, fDu, fLie, liens, fMods, modMap, q, tri])
+  }), [tx, debut, fin, fSource, fCat, fSens, fConf, fDu, fDuQui, fLie, liens, fMods, modMap, q, tri])
 
   // Synthèse de la sélection courante : entrées / sorties / net, en montants
   // NETS (virements liés effacés, dépenses liées réduites au prorata) et HORS
@@ -202,9 +213,22 @@ export default function Transactions({ onChange }) {
   const toggleDue = async (t) => {
     const v = !t.a_rembourser
     try {
-      await api.setDue(t.op_id, v)
+      await api.setDue(t.op_id, v, v ? (t.du_par || '') : '')
       setTx((prev) => prev.map((x) => x.op_id === t.op_id
-        ? { ...x, a_rembourser: v ? 1 : 0 } : x))
+        ? { ...x, a_rembourser: v ? 1 : 0, du_par: v ? (x.du_par || '') : '' } : x))
+      if (v) { setDueEdit(t.op_id); setDueName(t.du_par || '') }   // saisir qui doit
+      else setDueEdit(null)
+    } catch (e) { setMsg(e.message) }
+  }
+
+  // Nom du débiteur d'un remboursement (édition inline via la pastille).
+  const saveDueName = async (t) => {
+    const nom = dueName.trim()
+    setDueEdit(null)
+    if (nom === (t.du_par || '')) return
+    try {
+      await api.setDue(t.op_id, true, nom)
+      setTx((prev) => prev.map((x) => x.op_id === t.op_id ? { ...x, du_par: nom } : x))
     } catch (e) { setMsg(e.message) }
   }
 
@@ -218,12 +242,31 @@ export default function Transactions({ onChange }) {
     } catch (e) { setMsg(e.message) }
   }
 
+  // Pendant un classement (bloquant, plusieurs minutes), sonde l'état côté
+  // serveur et met à jour le bandeau : « X/Y opérations · N questions Ollama ».
+  // Le compteur de questions Ollama est le vrai indicateur de temps (~20 s pièce
+  // sur le Pi). L'intervalle est arrêté dès que l'opération se termine.
+  const withProgress = async (label, fn) => {
+    let live = true
+    const timer = setInterval(async () => {
+      try {
+        const p = await api.categorizeProgress()
+        if (live && p && p.running) {
+          setMsg(`${label} en cours… ${p.done}/${p.total} opérations`
+            + ` · ${p.questions} question${p.questions > 1 ? 's' : ''} Ollama`)
+        }
+      } catch { /* réseau : on réessaiera au prochain tick */ }
+    }, 1500)
+    try { return await fn() }
+    finally { live = false; clearInterval(timer) }
+  }
+
   // Réexamen des non-confirmées avec l'apprentissage à jour (corrections + few-shot).
   const reCat = async () => {
     setBusy(true)
     setMsg('Réexamen des opérations non confirmées… (peut prendre plusieurs minutes)')
     try {
-      const r = await api.recategorize()
+      const r = await withProgress('Réexamen', () => api.recategorize())
       setMsg(`${r.examinees} réexaminées · ${r.modifiees} modifiée${r.modifiees > 1 ? 's' : ''}`
         + ` · ${r.inchangees} inchangées`
         + (r.reste ? ` · ${r.reste} restantes — relancer pour continuer` : ''))
@@ -242,7 +285,7 @@ export default function Transactions({ onChange }) {
   const autoCat = async () => {
     setBusy(true); setMsg('Catégorisation en cours (Ollama)…')
     try {
-      const r = await api.categorize(true)
+      const r = await withProgress('Catégorisation', () => api.categorize(true))
       const det = r.detail || {}
       setMsg(`${r.traitees} traitées · ${det.rule || 0} par règles · ${det.ollama || 0} par Ollama · ${det.none || 0} restantes`)
       await load()
@@ -400,7 +443,7 @@ export default function Transactions({ onChange }) {
               onClick={() => {
                 const v = !fDu
                 setFDu(v)
-                if (v) { setPeriode('toujours'); setDec(0) }
+                if (v) { setPeriode('toujours'); setDec(0) } else setFDuQui(null)
               }}>
               <Refund /> À rembourser · {eur(du.total)}
             </button>
@@ -418,6 +461,25 @@ export default function Transactions({ onChange }) {
             </button>
           )}
         </div>
+
+        {/* Récap « qui me doit combien » : cliquer une personne filtre sur ses dépenses */}
+        {fDu && du.parPersonne.length > 0 && (
+          <div className="banner" style={{ marginBottom: 12, display: 'flex',
+            flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            <b style={{ marginRight: 4 }}>Qui te doit :</b>
+            {du.parPersonne.map(([who, montant]) => (
+              <button key={who} className={'due-pill' + (fDuQui === who ? ' sel' : '')}
+                style={{ marginLeft: 0 }}
+                title={fDuQui === who ? 'Retirer le filtre' : `Voir ce que ${who} te doit`}
+                onClick={() => setFDuQui((cur) => cur === who ? null : who)}>
+                {who} · {eur(montant)}</button>
+            ))}
+            {fDuQui && (
+              <button className="btn ghost" style={{ fontSize: 12 }}
+                onClick={() => setFDuQui(null)}>tout voir</button>
+            )}
+          </div>
+        )}
 
         <table>
           <thead>
@@ -454,7 +516,23 @@ export default function Transactions({ onChange }) {
                   <td className="num muted" style={{ textAlign: 'left' }}>
                     {dateFr(t.date)}</td>
                   <td className="lib">{t.libelle}
-                    {t.a_rembourser ? <span className="due-pill">à rembourser</span> : null}
+                    {t.a_rembourser ? (
+                      dueEdit === t.op_id ? (
+                        <input className="due-pill" autoFocus value={dueName}
+                          placeholder="qui doit ?" style={{ width: 96 }}
+                          onClick={(ev) => ev.stopPropagation()}
+                          onChange={(ev) => setDueName(ev.target.value)}
+                          onBlur={() => saveDueName(t)}
+                          onKeyDown={(ev) => { ev.stopPropagation()
+                            if (ev.key === 'Enter') ev.target.blur()
+                            if (ev.key === 'Escape') setDueEdit(null) }} />
+                      ) : (
+                        <button className="due-pill" title="Préciser qui te doit ce montant"
+                          onClick={(ev) => { ev.stopPropagation()
+                            setDueEdit(t.op_id); setDueName(t.du_par || '') }}>
+                          à rembourser{t.du_par ? ` · ${t.du_par}` : ' · qui ?'}</button>
+                      )
+                    ) : null}
                     {t.lien_groupe ? <span className="due-pill"
                       title={`Groupe de remboursement, avec : ${liens.partenaires.get(t.op_id) || '(incomplet)'}`}>
                       lié ↩</span> : null}</td>

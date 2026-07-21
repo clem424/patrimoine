@@ -12,6 +12,7 @@ const Dashboard    = lazy(() => import('./components/Dashboard.jsx'))
 const Transactions = lazy(() => import('./components/Transactions.jsx'))
 const Patrimoine   = lazy(() => import('./components/Patrimoine.jsx'))
 const Budget       = lazy(() => import('./components/Budget.jsx'))
+const Analyse      = lazy(() => import('./components/Analyse.jsx'))
 const Evenements   = lazy(() => import('./components/Evenements.jsx'))
 const Import       = lazy(() => import('./components/Import.jsx'))
 const Settings     = lazy(() => import('./components/Settings.jsx'))
@@ -20,6 +21,7 @@ const PAGES = [
   { id: 'dashboard', label: 'Tableau de bord', ic: '◆', comp: Dashboard },
   { id: 'patrimoine', label: 'Patrimoine', ic: '▲', comp: Patrimoine },
   { id: 'budget', label: 'Budget', ic: '◎', comp: Budget },
+  { id: 'analyse', label: 'Analyse', ic: '✦', comp: Analyse },
   { id: 'transactions', label: 'Opérations', ic: '≡', comp: Transactions },
   { id: 'evenements', label: 'Évènements', ic: '⚑', comp: Evenements },
   { id: 'import', label: 'Importer', ic: '↥', comp: Import },

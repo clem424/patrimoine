@@ -176,6 +176,10 @@ def init_db():
         if "a_rembourser" not in _cols(conn, "transactions"):
             conn.execute("ALTER TABLE transactions ADD COLUMN"
                          " a_rembourser INTEGER NOT NULL DEFAULT 0")
+        # Qui doit ce remboursement (nom libre, vide = non précisé).
+        if "du_par" not in _cols(conn, "transactions"):
+            conn.execute("ALTER TABLE transactions ADD COLUMN"
+                         " du_par TEXT NOT NULL DEFAULT ''")
         # Groupes de remboursement : opérations partageant un `lien_groupe`
         # (N virements reçus remboursent N dépenses ; les stats comptent le net).
         # Remplace l'ancien lien 1→1 `lie_a`, converti puis supprimé.
@@ -453,11 +457,17 @@ def unlink_op(uid: int, op_id: str):
                          " WHERE user_id=? AND lien_groupe=?", (uid, gid))
 
 
-def set_due(uid: int, op_id: str, du: bool):
-    """Marque/démarque une opération « à rembourser » (quelqu'un te doit ce montant)."""
+def set_due(uid: int, op_id: str, du: bool, par: str | None = None):
+    """Marque/démarque une opération « à rembourser » (quelqu'un te doit ce montant).
+    `par` = nom du débiteur (facultatif) ; démarquer efface le nom."""
     with get_db() as conn:
-        conn.execute("UPDATE transactions SET a_rembourser=? WHERE user_id=? AND op_id=?",
-                     (1 if du else 0, uid, op_id))
+        if du:
+            conn.execute("UPDATE transactions SET a_rembourser=1, du_par=?"
+                         " WHERE user_id=? AND op_id=?",
+                         ((par or "").strip(), uid, op_id))
+        else:
+            conn.execute("UPDATE transactions SET a_rembourser=0, du_par=''"
+                         " WHERE user_id=? AND op_id=?", (uid, op_id))
 
 
 def update_category(uid: int, op_id: str, categorie: str, how: str = "manual"):

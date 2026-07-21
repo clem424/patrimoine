@@ -56,6 +56,13 @@ export const Download = ({ size = 15 }) => (
   </svg>
 )
 
+export const Sparkles = ({ size = 15 }) => (
+  <svg {...base(size)}>
+    <path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5 10.1 7.6 12 3z" />
+    <path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8.8-2z" />
+  </svg>
+)
+
 export const EyeOff = ({ size = 15 }) => (
   <svg {...base(size)}>
     <path d="M17.94 17.94A10.4 10.4 0 0 1 12 19c-6.5 0-10-7-10-7a17.6 17.6 0 0 1 4.06-4.94" />
